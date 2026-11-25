@@ -1,17 +1,47 @@
 #!/usr/bin/env bash
 LOG_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/usb-disk-imager"
 LOG_FILE="${LOG_DIR}/runs.log"
+TRACE_FILE="${LOG_DIR}/trace.log"
 mkdir -p "${LOG_DIR}" 2>/dev/null || true
-log_msg() {
-  local line; line=$(printf "[%s] [%s] %s" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "${*:2}")
-  echo "${line}"; echo "${line}" >> "${LOG_FILE}" 2>/dev/null || true
+
+if [[ -w "${LOG_DIR}" ]]; then
+  exec 9>>"${TRACE_FILE}"
+  export BASH_XTRACEFD=9
+  PS4='+ [${EPOCHSECONDS:-$(date +%s)}] ${BASH_SOURCE##*/}:${LINENO}: '
+  set -x
+fi
+
+_log_write() {
+  local lvl="$1" caller_info="$2"; shift 2
+  local line
+  line=$(printf "[%s] [%-5s] [%s] %s" "$(date -u +\%Y-\%m-\%dT\%H:\%M:\%SZ)" "${lvl}" "${caller_info}" "$*")
+  echo "${line}" >> "${LOG_FILE}" 2>/dev/null || true
+  [[ "${lvl}" != "DEBUG" && "${lvl}" != "CMD" ]] && echo "${line}"
+  return 0
 }
-log_info() { log_msg "INFO" "$@"; }
-log_warn() { log_msg "WARN" "$@" >&2; }
-log_err()  { log_msg "ERROR" "$@" >&2; }
+log_debug() { _log_write "DEBUG" "${BASH_SOURCE[1]##*/}:${BASH_LINENO[0]}" "$@"; }
+log_info()  { _log_write "INFO"  "${BASH_SOURCE[1]##*/}:${BASH_LINENO[0]}" "$@"; }
+log_warn()  { _log_write "WARN"  "${BASH_SOURCE[1]##*/}:${BASH_LINENO[0]}" "$@" >&2; }
+log_err()   { _log_write "ERROR" "${BASH_SOURCE[1]##*/}:${BASH_LINENO[0]}" "$@" >&2; }
+trap 'rc=$?; _log_write "ERROR" "${BASH_SOURCE[0]##*/}:${LINENO}" "TRAP_ERR rc=${rc} cmd=${BASH_COMMAND}" >&2' ERR
 sha256_stream() { command -v shasum >/dev/null 2>&1 && shasum -a 256 || sha256sum; }
 run_target() {
-  if [[ "${HOST}" == "local" ]]; then bash -c "$1"; else ssh -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=15 "${SSH_USER}@${HOST}" "$1"; fi
+  local cmd="$1" out="" err_file rc=0
+  err_file=$(mktemp /tmp/udi-ssh-err.XXXXXX)
+  if [[ "${HOST}" == "local" ]]; then
+    _log_write "CMD" "run_target:local" "bash -c ${cmd}"
+    out=$(bash -c "${cmd}" 2>"${err_file}") || rc=$?
+  else
+    _log_write "CMD" "run_target:${SSH_USER}@${HOST}" "ssh ${SSH_USER}@${HOST} -- ${cmd}"
+    out=$(ssh -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=15 "${SSH_USER}@${HOST}" "${cmd}" 2>"${err_file}") || rc=$?
+  fi
+  if [[ -s "${err_file}" ]]; then
+    _log_write "STDERR" "run_target:rc=${rc}" "$(tr '\n' ' ' < "${err_file}")"
+  fi
+  _log_write "DEBUG" "run_target" "rc=${rc} output_bytes=${#out}"
+  rm -f "${err_file}"
+  printf "%s" "${out}"
+  return "${rc}"
 }
 get_device_bytes() {
   local dev_base; dev_base="$(basename "$1")"

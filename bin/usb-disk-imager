@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Author: Krzysztof Zielinski <https://github.com/kzielins>
 set -euo pipefail
-VERSION="2.2.1"
+VERSION="2.2.2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${PKG_DIR}/lib/discovery.sh"; load_saved_state
@@ -98,56 +98,14 @@ if [[ "${HOST}" != "local" ]]; then
     else [[ "${EXECUTE}" -eq 0 ]] && exit 0 || exit 1; fi
   done
 fi
-TARGETS=()
-while true; do
-  printf -v dm "${MSG_DISCOVERING}" "${HOST}"; log_info "${dm}"
-  DISCOVERY_OUT="$(discover_block_devices "${USB_ONLY}")"
-  if [[ "${DEVICE}" == "all-usb" || "${ALL_USB}" -eq 1 ]]; then
-    while IFS= read -r dl; do dc=$(echo "${dl}" | awk '{print $1}'); [[ "${dc}" =~ ^/dev/ ]] && ! echo "${dl}" | grep -q "BLOCKED" && TARGETS+=("${dc}"); done <<< "${DISCOVERY_OUT}"; break
-  elif [[ -n "${DEVICE}" ]]; then TARGETS=("${DEVICE}")
-  elif [[ -t 0 ]]; then
-    DISK_OPTS=()
-    while IFS= read -r dl; do [[ -z "${dl}" ]] && continue; dp=$(echo "${dl}" | awk '{print $1}'); [[ "${dp}" == "${SAVED_DEVICE:-}" ]] && DISK_OPTS+=("${dl} [last run]") || DISK_OPTS+=("${dl}"); done <<< "${DISCOVERY_OUT}"
-    DISK_OPTS+=("[Refresh / Show all devices (internal + USB)]" "[Custom device path]")
-    picked="$(tui_select "${MSG_SELECT_DISK}" "${DISK_OPTS[@]}")"
-    if [[ "${picked}" == "[Refresh / Show all devices (internal + USB)]" ]]; then USB_ONLY=0; continue
-    elif [[ "${picked}" == "[Custom device path]" ]]; then read -rp "Device path: " cdev </dev/tty; TARGETS=("${cdev}")
-    else TARGETS=("$(echo "${picked}" | awk '{print $1}')"); fi
-  else log_info "[DRY-RUN] Discovery completed."; exit 0; fi
-  if [[ "${#TARGETS[@]}" -eq 1 ]]; then
-    cand="${TARGETS[0]}"; cb="$(basename "${cand}")"
-    cand_line=$(echo "${DISCOVERY_OUT}" | grep -E "^${cand}[[:space:]]" || true)
-    cand_bus=$(echo "${cand_line}" | awk -F'|' '{print $3}' | tr -d ' ')
-    cand_gb=$(echo "${cand_line}" | awk -F'|' '{print $2}' | tr -dc '0-9'); cand_gb="${cand_gb:-0}"
-    if ! validate_device_syntax "${cand}"; then log_err "Invalid device path: ${cand}"
-    elif ! check_device_exists "${cand}"; then log_err "Device does not exist: ${cand}"
-    elif ! check_not_system_disk "${cb}"; then log_err "SAFETY BLOCK: ${cand} is RAID or internal DOM! Cannot image or unmount."
-    elif [[ "${MODE}" == "raw" ]] && ! check_not_mounted "${cand}"; then
-      log_warn "Device ${cand} (${cand_gb}GB, bus=${cand_bus:-unknown}) has mounted partitions."
-      if [[ "${AUTO_UNMOUNT}" -eq 1 ]]; then safe_unmount_usb_device "${cand}" "${cb}" "${cand_bus:-usb}" "${cand_gb}" && break
-      elif [[ -t 0 && -z "${DEVICE}" ]]; then
-        um_act="$(tui_select "How to handle mounted ${cand} (${cand_gb}GB)?" \
-          "Safely unmount USB partitions on ${cand} and continue (raw mode)" \
-          "Switch to --mode fs-archive (read-only archive without unmounting)" \
-          "Select a different device")"
-        case "${um_act}" in
-          "Safely unmount USB partitions"*) safe_unmount_usb_device "${cand}" "${cb}" "${cand_bus:-usb}" "${cand_gb}" && break ;;
-          "Switch to --mode fs-archive"*) MODE="fs-archive"; break ;;
-        esac
-      fi
-    else break; fi
-    if [[ -t 0 && -z "${DEVICE}" ]]; then log_warn "${MSG_DISK_RETRY}"; TARGETS=(); continue; else exit 1; fi
-  fi
-  break
-done
-[[ "${#TARGETS[@]}" -eq 0 ]] && { log_info "No eligible external USB devices found."; exit 0; }
 FIRST_BYTES=$(get_device_bytes "${TARGETS[0]}")
 FIRST_GB=$((FIRST_BYTES / 1024 / 1024 / 1024))
 LAST_DEVICE="${TARGETS[0]}"; LAST_DEVICE_SIZE="${FIRST_GB}GB"; save_state
 if [[ -z "${OUT_DIR}" ]]; then
   if [[ -t 0 ]]; then
     while true; do
-      log_info "${MSG_SCAN_DIRS} (depth=${SCAN_DEPTH}, source=${FIRST_GB}GB)"
+      NEXT_DEPTH=$((SCAN_DEPTH + 1))
+      log_info "${MSG_SCAN_DIRS} (depth=${SCAN_DEPTH}, source=${FIRST_GB}GB, roots: NAS /share/* + local ~/Backups, /Volumes)"
       DIR_OPTS=()
       while IFS='|' read -r dpath dfree dnote; do
         [[ -z "${dpath}" ]] && continue
@@ -157,11 +115,12 @@ if [[ -z "${OUT_DIR}" ]]; then
         else cmp_tag="${dfree}"; fi
         [[ "${dpath}" == "${SAVED_OUT_DIR:-}" ]] && DIR_OPTS+=("${dpath} (${cmp_tag}) [${dnote}] [last run]") || DIR_OPTS+=("${dpath} (${cmp_tag}) [${dnote}]")
       done < <(scan_smart_destinations "${SCAN_DEPTH}")
-      DIR_OPTS+=("[Scan deeper (depth 4) for VMware/disk images on NAS & local]" "[Custom directory path]")
+      DEEPER_LABEL="[Scan deeper (+1 -> depth ${NEXT_DEPTH}, current=${SCAN_DEPTH}) for VMware/disk images]"
+      DIR_OPTS+=("${DEEPER_LABEL}" "[Custom directory path]")
       dpick="$(tui_select "${MSG_SELECT_DIR}" "${DIR_OPTS[@]}")"
-      if [[ "${dpick}" == "[Scan deeper (depth 4) for VMware/disk images on NAS & local]" ]]; then SCAN_DEPTH=4; continue
+      if [[ "${dpick}" == "${DEEPER_LABEL}" ]]; then SCAN_DEPTH=$((SCAN_DEPTH + 1)); continue
       elif [[ "${dpick}" == "[Custom directory path]" ]]; then read -rp "Destination path (local:/path or remote:/share/...): " OUT_DIR </dev/tty; break
-      else OUT_DIR="$(echo "${dpick}" | sed -E 's/ \(free:.*$//; s/ \(last-run.*$//')"; break; fi
+      else OUT_DIR="$(echo "${dpick}" | sed -E 's/ \(free:.*$//')"; break; fi
     done
   else OUT_DIR="${SAVED_OUT_DIR:-local:${HOME}/Backups/usb-images}"; fi
 fi
@@ -222,3 +181,196 @@ for target_dev in "${TARGETS[@]}"; do
   fi
   log_info "${MSG_DONE} ${TARGET_SUBDIR}"
 done
+TARGETS=()
+TARGET_COUNT=0
+while true; do
+  printf -v dm "${MSG_DISCOVERING}" "${HOST}"; log_info "${dm}"
+  DISCOVERY_OUT="$(discover_block_devices "${USB_ONLY}" || true)"
+  log_debug "DISCOVERY_OUT=${DISCOVERY_OUT}"
+  if [[ "${DEVICE}" == "all-usb" || "${ALL_USB}" -eq 1 ]]; then
+    while IFS= read -r dl; do
+      dc=$(echo "${dl}" | awk '{print $1}')
+      if [[ "${dc}" =~ ^/dev/ ]] && ! echo "${dl}" | grep -q "BLOCKED"; then
+        TARGETS[${TARGET_COUNT}]="${dc}"; TARGET_COUNT=$((TARGET_COUNT + 1))
+      fi
+    done <<< "${DISCOVERY_OUT}"
+    break
+  elif [[ -n "${DEVICE}" ]]; then
+    TARGETS[0]="${DEVICE}"; TARGET_COUNT=1
+  elif [[ -t 0 ]]; then
+    DISK_OPTS=(); D_CNT=0
+    while IFS= read -r dl; do
+      [[ -z "${dl}" ]] && continue
+      dp=$(echo "${dl}" | awk '{print $1}')
+      [[ "${dp}" == "${SAVED_DEVICE:-}" ]] && DISK_OPTS[${D_CNT}]="${dl} [last run]" || DISK_OPTS[${D_CNT}]="${dl}"
+      D_CNT=$((D_CNT + 1))
+    done <<< "${DISCOVERY_OUT}"
+    DISK_OPTS[${D_CNT}]="[Refresh / Show all devices (internal + USB)]"; D_CNT=$((D_CNT + 1))
+    DISK_OPTS[${D_CNT}]="[Custom device path]"
+    picked="$(tui_select "${MSG_SELECT_DISK}" "${DISK_OPTS[@]}")"
+    if [[ "${picked}" == "[Refresh / Show all devices (internal + USB)]" ]]; then USB_ONLY=0; continue
+    elif [[ "${picked}" == "[Custom device path]" ]]; then
+      read -rp "Device path: " cdev </dev/tty
+      [[ -n "${cdev}" ]] && { TARGETS[0]="${cdev}"; TARGET_COUNT=1; }
+    else
+      TARGETS[0]="$(echo "${picked}" | awk '{print $1}')"; TARGET_COUNT=1
+    fi
+  else
+    log_info "[DRY-RUN] Discovery completed."; exit 0
+  fi
+
+  if [[ "${TARGET_COUNT}" -eq 1 ]]; then
+    cand="${TARGETS[0]}"; cb="$(basename "${cand}")"
+    cand_line=$(echo "${DISCOVERY_OUT}" | grep -E "^${cand}[[:space:]]" || true)
+    cand_bus=$(echo "${cand_line}" | awk -F'|' '{print $3}' | tr -d ' ')
+    cand_gb=$(echo "${cand_line}" | awk -F'|' '{print $2}' | tr -dc '0-9'); cand_gb="${cand_gb:-0}"
+    if ! validate_device_syntax "${cand}"; then log_err "Invalid device path: ${cand}"
+    elif ! check_device_exists "${cand}"; then log_err "Device does not exist: ${cand}"
+    elif ! check_not_system_disk "${cb}"; then log_err "SAFETY BLOCK: ${cand} is RAID or internal DOM! Cannot image or unmount."
+    elif [[ "${MODE}" == "raw" ]] && ! check_not_mounted "${cand}"; then
+      log_warn "Device ${cand} (${cand_gb}GB, bus=${cand_bus:-unknown}) has mounted partitions."
+      if [[ "${AUTO_UNMOUNT}" -eq 1 ]]; then safe_unmount_usb_device "${cand}" "${cb}" "${cand_bus:-usb}" "${cand_gb}" && break
+      elif [[ -t 0 && -z "${DEVICE}" ]]; then
+        um_act="$(tui_select "How to handle mounted ${cand} (${cand_gb}GB)?" \
+          "Safely unmount USB partitions on ${cand} and continue (raw mode)" \
+          "Switch to --mode fs-archive (read-only archive without unmounting)" \
+          "Select a different device")"
+        case "${um_act}" in
+          "Safely unmount USB partitions"*) safe_unmount_usb_device "${cand}" "${cb}" "${cand_bus:-usb}" "${cand_gb}" && break ;;
+          "Switch to --mode fs-archive"*) MODE="fs-archive"; break ;;
+        esac
+      fi
+    else break; fi
+    if [[ -t 0 && -z "${DEVICE}" ]]; then log_warn "${MSG_DISK_RETRY}"; TARGETS=(); TARGET_COUNT=0; continue; else exit 1; fi
+  fi
+  break
+done
+[[ "${TARGET_COUNT}" -eq 0 ]] && { log_info "No eligible external USB devices found."; exit 0; }
+
+FIRST_BYTES=$(get_device_bytes "${TARGETS[0]}")
+FIRST_GB=$((FIRST_BYTES / 1024 / 1024 / 1024))
+LAST_DEVICE="${TARGETS[0]}"; LAST_DEVICE_SIZE="${FIRST_GB}GB"; save_state
+if [[ -z "${OUT_DIR}" ]]; then
+  if [[ -t 0 ]]; then
+    while true; do
+      NEXT_DEPTH=$((SCAN_DEPTH + 1))
+      log_info "${MSG_SCAN_DIRS} (depth=${SCAN_DEPTH}, source=${FIRST_GB}GB, roots: NAS /share/* + local ~/Backups, /Volumes)"
+      DIR_OPTS=()
+      while IFS='|' read -r dpath dfree dnote; do
+        [[ -z "${dpath}" ]] && continue
+        if [[ "${dfree}" =~ ^[0-9]+$ ]]; then
+          if (( FIRST_GB > dfree )); then cmp_tag="free: ${dfree}GB vs src: ${FIRST_GB}GB -> [TOO SMALL!]"
+          else cmp_tag="free: ${dfree}GB vs src: ${FIRST_GB}GB -> OK"; fi
+        else cmp_tag="${dfree}"; fi
+        [[ "${dpath}" == "${SAVED_OUT_DIR:-}" ]] && DIR_OPTS+=("${dpath} (${cmp_tag}) [${dnote}] [last run]") || DIR_OPTS+=("${dpath} (${cmp_tag}) [${dnote}]")
+      done < <(scan_smart_destinations "${SCAN_DEPTH}")
+      DEEPER_LABEL="[Scan deeper (+1 -> depth ${NEXT_DEPTH}, current=${SCAN_DEPTH}) for VMware/disk images]"
+      DIR_OPTS+=("${DEEPER_LABEL}" "[Custom directory path]")
+      dpick="$(tui_select "${MSG_SELECT_DIR}" "${DIR_OPTS[@]}")"
+      if [[ "${dpick}" == "${DEEPER_LABEL}" ]]; then SCAN_DEPTH=$((SCAN_DEPTH + 1)); continue
+      elif [[ "${dpick}" == "[Custom directory path]" ]]; then read -rp "Destination path (local:/path or remote:/share/...): " OUT_DIR </dev/tty; break
+      else OUT_DIR="$(echo "${dpick}" | sed -E 's/ \(free:.*$//')"; break; fi
+    done
+  else OUT_DIR="${SAVED_OUT_DIR:-local:${HOME}/Backups/usb-images}"; fi
+fi
+save_state
+HOST_LABEL="${HOST}"; [[ "${HOST}" == "local" ]] && HOST_LABEL="$(hostname -s 2>/dev/null || echo local-host)"
+for target_dev in "${TARGETS[@]}"; do
+  validate_device_syntax "${target_dev}" || continue; DEV_BASE="$(basename "${target_dev}")"
+  check_device_exists "${target_dev}" || continue; check_not_system_disk "${DEV_BASE}" || continue
+  if [[ "${MODE}" == "raw" ]] && ! check_not_mounted "${target_dev}"; then
+    [[ "${AUTO_UNMOUNT}" -eq 1 ]] && { safe_unmount_usb_device "${target_dev}" "${DEV_BASE}" "usb" "0" || continue; } || continue
+  fi
+  if [[ "${OS_ONLY}" -eq 1 ]]; then
+    log_info "${MSG_OS_CHECK} (${target_dev})"; OS_SIG="$(detect_os_on_device "${target_dev}")"
+    [[ -z "${OS_SIG}" ]] && { log_info "${MSG_OS_SKIP} ${target_dev}"; continue; }
+    log_info "${MSG_OS_FOUND} ${OS_SIG}"
+  fi
+  DEV_BYTES=$(get_device_bytes "${target_dev}"); DEV_GB=$((DEV_BYTES / 1024 / 1024 / 1024))
+  LAST_DEVICE="${target_dev}"; LAST_DEVICE_SIZE="${DEV_GB}GB"; save_state
+  CLEAN_OUT="${OUT_DIR#local:}"; CLEAN_OUT="${CLEAN_OUT#remote:}"
+  if [[ "${OUT_DIR}" == remote:* ]]; then
+    DEST_FREE_GB=$(run_target "p='${CLEAN_OUT}'; while [ ! -d \"\$p\" ] && [ \"\$p\" != '/' ]; do p=\$(dirname \"\$p\"); done; df -k \"\$p\" 2>/dev/null | awk 'NR==2 {print int(\$4/1024/1024)}'" || echo 0)
+  else
+    PARENT_CHECK="${CLEAN_OUT}"; while [[ ! -d "${PARENT_CHECK}" && "${PARENT_CHECK}" != "/" ]]; do PARENT_CHECK="$(dirname "${PARENT_CHECK}")"; done
+    DEST_FREE_GB=$(( $(df -k "${PARENT_CHECK}" 2>/dev/null | awk 'NR==2 {print $4}' || echo 0) / 1024 / 1024 ))
+  fi
+  SIZE_VERDICT="OK (${DEV_GB} GB source <= ${DEST_FREE_GB} GB destination free)"
+  (( DEV_GB > DEST_FREE_GB )) && SIZE_VERDICT="CRITICAL WARNING: Source (${DEV_GB} GB) > Destination Free (${DEST_FREE_GB} GB)!"
+  TIMESTAMP="$(date -u +%Y%m%d-%H%M%SZ)"; TARGET_SUBDIR="${OUT_DIR}/${HOST_LABEL}/${DEV_BASE}"
+  [[ "${MODE}" == "fs-archive" ]] && { EXT="tar.zst"; [[ "${COMPRESSOR}" == "gzip" ]] && EXT="tar.gz"; } || { EXT="img.zst"; [[ "${COMPRESSOR}" == "gzip" ]] && EXT="img.gz"; }
+  IMG_FILE="${TARGET_SUBDIR}/${HOST_LABEL}-${DEV_BASE}-${TIMESTAMP}.${EXT}"; SHA_FILE="${IMG_FILE#local:}.sha256"; META_FILE="${IMG_FILE#local:}.meta.txt"
+  echo ""; echo "${MSG_SUMMARY_HDR}"
+  echo "  Execution Mode: $( [[ "${EXECUTE}" -eq 1 ]] && printf "\033[1;31mEXECUTE (READ-WRITE OUTPUT)\033[0m" || printf "\033[1;32mDRY-RUN (READ-ONLY)\033[0m" )"
+  echo "  Log File:       ${LOG_FILE}"
+  echo "  Target Host:    ${SSH_USER}@${HOST}"
+  echo "  Source Device:  ${target_dev} (${DEV_GB} GB / ${DEV_BYTES} bytes)"
+  echo "  Destination:    ${TARGET_SUBDIR} (free: ${DEST_FREE_GB} GB)"
+  echo "  Size Compare:   ${SIZE_VERDICT}"
+  echo "  RAID/DOM Guard: PASSED (verified non-RAID, non-internal-DOM)"
+  echo "  Imaging Mode:   ${MODE} (compressor=${COMPRESSOR}, os-only=${OS_ONLY})"
+  echo "  Output File:    ${IMG_FILE}"
+  echo "------------------------------------"
+  [[ "${EXECUTE}" -eq 0 ]] && { log_info "[DRY-RUN] Verification complete. Zero bytes written."; continue; }
+  if (( DEV_GB > DEST_FREE_GB )) && [[ "${YES_FLAG}" -eq 0 ]]; then
+    log_err "Refusing write: Source (${DEV_GB} GB) exceeds destination free space (${DEST_FREE_GB} GB). Use --yes to override."
+    continue
+  fi
+  if [[ "${YES_FLAG}" -eq 0 && -t 0 ]]; then
+    read -rp "${MSG_CONFIRM_1}" C1 </dev/tty; [[ ! "${C1}" =~ ^([yY]|[yY][eE][sS]|[tT]|[tT][aA][kK])$ ]] && { log_info "${MSG_ABORT}"; continue; }
+    printf -v c2p "${MSG_CONFIRM_2}" "${IMG_FILE}"; read -rp "${c2p}" C2 </dev/tty; [[ "${C2}" != "YES" && "${C2}" != "TAK" ]] && { log_info "${MSG_ABORT}"; continue; }
+  fi
+  log_info "${MSG_START_DUMP}"
+  if [[ "${MODE}" == "fs-archive" ]]; then
+    mkdir -p "${TARGET_SUBDIR#local:}"
+    stream_filtered_archive "${target_dev}" "${IMG_FILE}" "${SHA_FILE}" "${COMPRESSOR}" "${MAX_FILE_SIZE}" "${EXCLUDE_PATTERN}"
+  else
+    [[ "${IMG_FILE}" != remote:* ]] && mkdir -p "${TARGET_SUBDIR#local:}"
+    stream_raw_image "${target_dev}" "${IMG_FILE#local:}" "${SHA_FILE}" "${COMPRESSOR}"
+  fi
+  log_info "${MSG_DONE} ${TARGET_SUBDIR}"
+done
+TARGETS=()
+while true; do
+  printf -v dm "${MSG_DISCOVERING}" "${HOST}"; log_info "${dm}"
+  DISCOVERY_OUT="$(discover_block_devices "${USB_ONLY}")"
+  if [[ "${DEVICE}" == "all-usb" || "${ALL_USB}" -eq 1 ]]; then
+    while IFS= read -r dl; do dc=$(echo "${dl}" | awk '{print $1}'); [[ "${dc}" =~ ^/dev/ ]] && ! echo "${dl}" | grep -q "BLOCKED" && TARGETS+=("${dc}"); done <<< "${DISCOVERY_OUT}"; break
+  elif [[ -n "${DEVICE}" ]]; then TARGETS=("${DEVICE}")
+  elif [[ -t 0 ]]; then
+    DISK_OPTS=()
+    while IFS= read -r dl; do [[ -z "${dl}" ]] && continue; dp=$(echo "${dl}" | awk '{print $1}'); [[ "${dp}" == "${SAVED_DEVICE:-}" ]] && DISK_OPTS+=("${dl} [last run]") || DISK_OPTS+=("${dl}"); done <<< "${DISCOVERY_OUT}"
+    DISK_OPTS+=("[Refresh / Show all devices (internal + USB)]" "[Custom device path]")
+    picked="$(tui_select "${MSG_SELECT_DISK}" "${DISK_OPTS[@]}")"
+    if [[ "${picked}" == "[Refresh / Show all devices (internal + USB)]" ]]; then USB_ONLY=0; continue
+    elif [[ "${picked}" == "[Custom device path]" ]]; then read -rp "Device path: " cdev </dev/tty; [[ -n "${cdev}" ]] && TARGETS=("${cdev}")
+    else TARGETS=("$(echo "${picked}" | awk '{print $1}')"); fi
+  else log_info "[DRY-RUN] Discovery completed."; exit 0; fi
+  if [[ "${#TARGETS[@]}" -eq 1 ]]; then
+    cand="${TARGETS[0]-}"; cb="$(basename "${cand}")"
+    cand_line=$(echo "${DISCOVERY_OUT}" | grep -E "^${cand}[[:space:]]" || true)
+    cand_bus=$(echo "${cand_line}" | awk -F'|' '{print $3}' | tr -d ' ')
+    cand_gb=$(echo "${cand_line}" | awk -F'|' '{print $2}' | tr -dc '0-9'); cand_gb="${cand_gb:-0}"
+    if ! validate_device_syntax "${cand}"; then log_err "Invalid device path: ${cand}"
+    elif ! check_device_exists "${cand}"; then log_err "Device does not exist: ${cand}"
+    elif ! check_not_system_disk "${cb}"; then log_err "SAFETY BLOCK: ${cand} is RAID or internal DOM! Cannot image or unmount."
+    elif [[ "${MODE}" == "raw" ]] && ! check_not_mounted "${cand}"; then
+      log_warn "Device ${cand} (${cand_gb}GB, bus=${cand_bus:-unknown}) has mounted partitions."
+      if [[ "${AUTO_UNMOUNT}" -eq 1 ]]; then safe_unmount_usb_device "${cand}" "${cb}" "${cand_bus:-usb}" "${cand_gb}" && break
+      elif [[ -t 0 && -z "${DEVICE}" ]]; then
+        um_act="$(tui_select "How to handle mounted ${cand} (${cand_gb}GB)?" \
+          "Safely unmount USB partitions on ${cand} and continue (raw mode)" \
+          "Switch to --mode fs-archive (read-only archive without unmounting)" \
+          "Select a different device")"
+        case "${um_act}" in
+          "Safely unmount USB partitions"*) safe_unmount_usb_device "${cand}" "${cb}" "${cand_bus:-usb}" "${cand_gb}" && break ;;
+          "Switch to --mode fs-archive"*) MODE="fs-archive"; break ;;
+        esac
+      fi
+    else break; fi
+    if [[ -t 0 && -z "${DEVICE}" ]]; then log_warn "${MSG_DISK_RETRY}"; TARGETS=(); continue; else exit 1; fi
+  fi
+  break
+done
+[[ -z "${TARGETS[*]-}" ]] && { log_info "No eligible external USB devices found."; exit 0; }
+

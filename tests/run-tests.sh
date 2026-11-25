@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export XDG_STATE_HOME="$(mktemp -d)" XDG_CONFIG_HOME="$(mktemp -d)"
 PKG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; BIN="${PKG_DIR}/bin/usb-disk-imager"
 log_info() { :; }; log_err() { :; }; run_target() { echo ""; }
 echo "[1/7] Version & help..."
-"${BIN}" --version | grep >/dev/null "2.2.0"
+"${BIN}" --version | grep >/dev/null "2.2.2"
 "${BIN}" --help | grep >/dev/null "usb-disk-imager"
 echo "[2/7] Non-interactive dry-run (EN & PL)..."
 "${BIN}" --dry-run </dev/null | grep >/dev/null "INDEPENDENT DRY-RUN"

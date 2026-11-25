@@ -30,28 +30,39 @@ discover_candidate_users() {
 }
 scan_smart_destinations() {
   local depth="${1:-3}"
-  [[ -n "${SAVED_OUT_DIR:-}" ]] && printf "%s|last-run saved target\n" "${SAVED_OUT_DIR}"
+  if [[ -n "${SAVED_OUT_DIR:-}" ]]; then
+    local sp="${SAVED_OUT_DIR#local:}"; sp="${sp#remote:}"
+    if [[ "${SAVED_OUT_DIR}" == remote:* && -n "${HOST:-}" && "${HOST}" != "local" ]]; then
+      sfree=$(run_target "p='${sp}'; while [ ! -d \"\$p\" ] && [ \"\$p\" != '/' ]; do p=\$(dirname \"\$p\"); done; df -k \"\$p\" 2>/dev/null | awk 'NR==2 {print int(\$4/1024/1024)}'" || echo 0)
+      printf "%s|%s|last-run target\n" "${SAVED_OUT_DIR}" "${sfree:-0}"
+    else
+      local lp="${sp}"; while [[ ! -d "${lp}" && "${lp}" != "/" ]]; do lp="$(dirname "${lp}")"; done
+      sfree=$(df -k "${lp}" 2>/dev/null | awk 'NR==2 {print int($4/1024/1024)}' || echo 0)
+      printf "local:%s|%s|last-run target\n" "${sp}" "${sfree:-0}"
+    fi
+  fi
   if [[ -n "${HOST:-}" && "${HOST}" != "local" ]]; then
     run_target "DEPTH='${depth}' bash -s" << 'REMOTE_DIRS' 2>/dev/null || true
-      for root in /share/CACHEDEV*_DATA /share/MD*_DATA /share/Public /share/Backups /mnt /srv /data; do
-        [ -d "$root" ] || continue
-        case "$root" in /share/Public|/share/Backups) [ -L "$root" ] && continue ;; esac
-        avail=$(df -BG "$root" 2>/dev/null | awk 'NR==2 {gsub("G","",$4); print $4}')
-        printf "remote:%s/usb-images|%s|NAS volume root\n" "$root" "${avail:-0}"
-        find "$root" -maxdepth "$DEPTH" -type f \( -iname "*.vmdk" -o -iname "*.vhdx" -o -iname "*.vhd" -o -iname "*.qcow2" -o -iname "*.img" -o -iname "*.img.zst" -o -iname "*.img.gz" -o -iname "*.ova" -o -iname "*.iso" \) 2>/dev/null \
-          | head -n 120 | while IFS= read -r f; do
+      for s in /share/* /share/CACHEDEV*_DATA/* /share/MD*_DATA/* /mnt/* /srv/* /data/*; do
+        [ -d "$s" ] || continue; b=$(basename "$s")
+        case "$b" in @*|.*|lost+found|CACHEDEV*_DATA|MD*_DATA|external|HDA_DATA|HDB_DATA|HDC_DATA|HDD_DATA) continue ;; esac
+        avail=$(df -k "$s/" 2>/dev/null | awk 'NR==2 {print int($4/1024/1024)}')
+        printf "remote:%s/usb-images|%s|NAS share (%s)\n" "$s" "${avail:-0}" "$b"
+        find "$s/" -maxdepth "$DEPTH" \( -name "@Recycle" -o -name ".@__thumb" -o -name ".qpkg" \) -prune -o \
+          -type f \( -iname "*.vmdk" -o -iname "*.vmx" -o -iname "*.vhdx" -o -iname "*.vhd" -o -iname "*.qcow2" -o -iname "*.img" -o -iname "*.img.zst" -o -iname "*.img.gz" -o -iname "*.ova" -o -iname "*.iso" \) -print 2>/dev/null \
+          | head -n 80 | while IFS= read -r f; do
               d1=$(dirname "$f"); d0=$(dirname "$d1"); ext="${f##*.}"
               printf "remote:%s|%s|contains .%s (%s)\n" "$d1" "${avail:-0}" "$ext" "$(basename "$d1")"
               [ "$d0" != "/" ] && [ "$d0" != "/share" ] && printf "remote:%s/usb-images|%s|parent of %s (.%s)\n" "$d0" "${avail:-0}" "$(basename "$d1")" "$ext"
             done
-      done | awk -F'|' '!seen[$1]++ {print $0}' | head -n 25
+      done | awk -F'|' '!seen[$1]++ {print $0}' | head -n 40
 REMOTE_DIRS
   fi
   for lroot in "${HOME}/Backups" "/Volumes" "/mnt" "/media"; do
     [[ -d "${lroot}" ]] || continue
     avail_l=$(df -k "${lroot}" 2>/dev/null | awk 'NR==2 {print int($4/1024/1024)}')
     [[ "${lroot}" == "${HOME}/Backups" ]] && printf "local:%s/usb-images|%s|Mac/Local backup folder\n" "${lroot}" "${avail_l:-0}"
-    find "${lroot}" -maxdepth "${depth}" -type f \( -iname "*.vmdk" -o -iname "*.vhdx" -o -iname "*.img" -o -iname "*.img.zst" -o -iname "*.ova" -o -iname "*.iso" \) 2>/dev/null \
+    find "${lroot}" -maxdepth "${depth}" -type f \( -iname "*.vmdk" -o -iname "*.vmx" -o -iname "*.vhdx" -o -iname "*.img" -o -iname "*.img.zst" -o -iname "*.ova" -o -iname "*.iso" \) 2>/dev/null \
       | grep -v '/Volumes/Macintosh HD' | head -n 40 | while IFS= read -r lf; do
           ld1=$(dirname "$lf"); ld0=$(dirname "$ld1"); lext="${lf##*.}"
           printf "local:%s|%s|local .%s folder\n" "$ld1" "${avail_l:-0}" "$lext"
