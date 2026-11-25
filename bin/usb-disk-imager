@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Author: Krzysztof Zielinski <https://github.com/kzielins>
+set -euo pipefail
+VERSION="2.2.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PKG_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${PKG_DIR}/lib/discovery.sh"; load_saved_state
+LANG_CODE="${USB_IMAGER_LANG:-${SAVED_LANG:-en}}"; HOST=""; SSH_USER=""; USER_EXPLICIT=0; DEVICE=""; OUT_DIR=""
+EXECUTE=0; YES_FLAG=0; USB_ONLY=1; OS_ONLY=0; ALL_USB=0; AUTO_UNMOUNT=0; MODE="raw"; MAX_FILE_SIZE=""; EXCLUDE_PATTERN=""; KEEP_BACKUPS=3; COMPRESSOR="zstd"
+usage() {
+  cat << 'USAGE'
+Usage: usb-disk-imager [OPTIONS]
+  -H, --host <host>           Target host or 'local'
+  -u, --user <user>           SSH username
+  -d, --device <dev>          Source block device (e.g. /dev/sdc) or 'all-usb'
+  -o, --out-dir <dir>         Destination directory
+  -m, --mode <raw|fs-archive> 'raw' (dd) or 'fs-archive' (ro mount + file filter)
+      --max-file-size <size>  Max file size in fs-archive mode (e.g. 500M)
+      --exclude <glob>        Exclude filename pattern in fs-archive mode (e.g. '*.iso')
+      --usb-only              Only external USB devices (default)
+      --all-devices           Show internal + USB devices
+      --all-usb               Process all external USB devices
+      --os-only               Only USB drives with detected Windows/Linux/macOS
+      --auto-unmount          Safely unmount external USB partitions if mounted
+  -k, --keep <N>              Keep last N backups per device (default: 3)
+  -l, --lang <en|pl>          Language: en | pl
+      --execute               READ-WRITE OUTPUT: write backup image files
+      --dry-run               INDEPENDENT READ-ONLY simulation (default)
+      --yes                   Skip confirmation prompts
+  -v, --version               Show version
+  -h, --help                  Show help
+USAGE
+}
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -H|--host) HOST="$2"; shift 2 ;; -u|--user) SSH_USER="$2"; USER_EXPLICIT=1; shift 2 ;;
+    -d|--device) DEVICE="$2"; shift 2 ;; -o|--out-dir) OUT_DIR="$2"; shift 2 ;;
+    -m|--mode) MODE="$2"; shift 2 ;; --max-file-size) MAX_FILE_SIZE="$2"; shift 2 ;;
+    --exclude) EXCLUDE_PATTERN="$2"; shift 2 ;; --usb-only) USB_ONLY=1; shift ;;
+    --all-devices) USB_ONLY=0; shift ;; --all-usb) ALL_USB=1; shift ;; --os-only) OS_ONLY=1; shift ;;
+    --auto-unmount) AUTO_UNMOUNT=1; shift ;; -k|--keep) KEEP_BACKUPS="$2"; shift 2 ;;
+    -l|--lang) LANG_CODE="$2"; shift 2 ;; --execute) EXECUTE=1; shift ;; --dry-run) EXECUTE=0; shift ;;
+    --yes) YES_FLAG=1; shift ;; -v|--version) echo "usb-disk-imager ${VERSION}"; exit 0 ;;
+    -h|--help) usage; exit 0 ;; *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
+  esac
+done
+if [[ -f "${PKG_DIR}/i18n/${LANG_CODE}.sh" ]]; then source "${PKG_DIR}/i18n/${LANG_CODE}.sh"; else source "${PKG_DIR}/i18n/en.sh"; fi
+source "${PKG_DIR}/lib/tui.sh"; source "${PKG_DIR}/lib/core.sh"; source "${PKG_DIR}/lib/guards.sh"
+command -v zstd >/dev/null 2>&1 || COMPRESSOR="gzip"
+echo "================================================================================"
+echo "  UNIVERSAL USB DISK IMAGER v${VERSION} (Vendor-Agnostic SSH / Local Backup Tool)"
+echo "  Purpose: Safely image external USB drives (dd + zstd/gzip + SHA256) read-only."
+echo "           Protects RAID arrays & internal boot DOMs. Pass -h for full options."
+if [[ "${EXECUTE}" -eq 1 ]]; then
+  printf "  MODE: \033[1;31m[EXECUTE / READ-WRITE OUTPUT] WARNING: Writes image files & may unmount USB!\033[0m\n"
+else
+  printf "  MODE: \033[1;32m[INDEPENDENT DRY-RUN / STRICT READ-ONLY] Zero bytes written to disk.\033[0m\n"
+fi
+echo "================================================================================"
+select_host_interactive() {
+  log_info "${MSG_SCAN_HOSTS}"; local opts=()
+  while IFS= read -r h; do [[ -z "${h}" ]] && continue; [[ "${h}" == "${SAVED_HOST:-}" ]] && opts+=("${h} [default]") || opts+=("${h}"); done < <(discover_candidate_hosts)
+  opts+=("[Custom hostname/IP]")
+  local choice; choice="$(tui_select "${MSG_SELECT_HOST}" "${opts[@]}")"; choice="${choice% \[default\]}"
+  [[ "${choice}" == "[Custom hostname/IP]" ]] && read -rp "Hostname / IP: " HOST </dev/tty || HOST="${choice}"
+}
+select_user_interactive() {
+  local opts=()
+  while IFS= read -r u; do [[ -z "${u}" ]] && continue; [[ "${u}" == "${SAVED_USER:-admin}" ]] && opts+=("${u} [default]") || opts+=("${u}"); done < <(discover_candidate_users)
+  opts+=("[Custom SSH username]")
+  local p; printf -v p "${MSG_SELECT_USER}" "${HOST}"
+  local choice; choice="$(tui_select "${p}" "${opts[@]}")"; choice="${choice% \[default\]}"
+  [[ "${choice}" == "[Custom SSH username]" ]] && read -rp "SSH username: " SSH_USER </dev/tty || SSH_USER="${choice}"
+}
+if [[ -z "${HOST}" ]]; then
+  if [[ -t 0 ]]; then select_host_interactive
+  else [[ "${EXECUTE}" -eq 0 ]] && { log_info "[DRY-RUN] No --host supplied. Exiting cleanly."; exit 0; }; log_err "Target host required."; exit 1; fi
+fi
+if [[ "${HOST}" != "local" ]]; then
+  if [[ "${USER_EXPLICIT}" -eq 0 ]]; then [[ -t 0 ]] && select_user_interactive || SSH_USER="${SAVED_USER:-admin}"; fi
+  while ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${SSH_USER}@${HOST}" "echo ok" >/dev/null 2>&1; do
+    log_warn "SSH connection failed for ${SSH_USER}@${HOST}."
+    if [[ -t 0 ]]; then
+      printf -v rh "${MSG_SSH_RETRY}" "${SSH_USER}" "${HOST}"
+      ra="$(tui_select "${rh}" "Select another SSH user" "Select another host" "Abort")"
+      case "${ra}" in
+        "Select another SSH user") select_user_interactive ;;
+        "Select another host") select_host_interactive; [[ "${HOST}" == "local" ]] && break; select_user_interactive ;;
+        *) exit 1 ;;
+      esac
+    else [[ "${EXECUTE}" -eq 0 ]] && exit 0 || exit 1; fi
+  done
+fi
+TARGETS=()
+while true; do
+  printf -v dm "${MSG_DISCOVERING}" "${HOST}"; log_info "${dm}"
+  DISCOVERY_OUT="$(discover_block_devices "${USB_ONLY}")"
+  if [[ "${DEVICE}" == "all-usb" || "${ALL_USB}" -eq 1 ]]; then
+    while IFS= read -r dl; do dc=$(echo "${dl}" | awk '{print $1}'); [[ "${dc}" =~ ^/dev/ ]] && ! echo "${dl}" | grep -q "BLOCKED" && TARGETS+=("${dc}"); done <<< "${DISCOVERY_OUT}"; break
+  elif [[ -n "${DEVICE}" ]]; then TARGETS=("${DEVICE}")
+  elif [[ -t 0 ]]; then
+    DISK_OPTS=()
+    while IFS= read -r dl; do [[ -z "${dl}" ]] && continue; dp=$(echo "${dl}" | awk '{print $1}'); [[ "${dp}" == "${SAVED_DEVICE:-}" ]] && DISK_OPTS+=("${dl} [default]") || DISK_OPTS+=("${dl}"); done <<< "${DISCOVERY_OUT}"
+    DISK_OPTS+=("[Refresh / Show all devices (internal + USB)]" "[Custom device path]")
+    picked="$(tui_select "${MSG_SELECT_DISK}" "${DISK_OPTS[@]}")"
+    if [[ "${picked}" == "[Refresh / Show all devices (internal + USB)]" ]]; then USB_ONLY=0; continue
+    elif [[ "${picked}" == "[Custom device path]" ]]; then read -rp "Device path: " cdev </dev/tty; TARGETS=("${cdev}")
+    else TARGETS=("$(echo "${picked}" | awk '{print $1}')"); fi
+  else log_info "[DRY-RUN] Discovery completed."; exit 0; fi
+  if [[ "${#TARGETS[@]}" -eq 1 ]]; then
+    cand="${TARGETS[0]}"; cb="$(basename "${cand}")"
+    cand_line=$(echo "${DISCOVERY_OUT}" | grep -E "^${cand}[[:space:]]" || true)
+    cand_bus=$(echo "${cand_line}" | awk -F'|' '{print $3}' | tr -d ' ')
+    cand_gb=$(echo "${cand_line}" | awk -F'|' '{print $2}' | tr -dc '0-9'); cand_gb="${cand_gb:-0}"
+    if ! validate_device_syntax "${cand}"; then log_err "Invalid device path: ${cand}"
+    elif ! check_device_exists "${cand}"; then log_err "Device does not exist: ${cand}"
+    elif ! check_not_system_disk "${cb}"; then log_err "SAFETY BLOCK: ${cand} is RAID or internal DOM! Cannot image or unmount."
+    elif [[ "${MODE}" == "raw" ]] && ! check_not_mounted "${cand}"; then
+      log_warn "Device ${cand} (${cand_gb}GB, bus=${cand_bus:-unknown}) has mounted partitions."
+      if [[ "${AUTO_UNMOUNT}" -eq 1 ]]; then safe_unmount_usb_device "${cand}" "${cb}" "${cand_bus:-usb}" "${cand_gb}" && break
+      elif [[ -t 0 && -z "${DEVICE}" ]]; then
+        um_act="$(tui_select "How to handle mounted ${cand} (${cand_gb}GB)?" \
+          "Safely unmount USB partitions on ${cand} and continue (raw mode)" \
+          "Switch to --mode fs-archive (read-only archive without unmounting)" \
+          "Select a different device")"
+        case "${um_act}" in
+          "Safely unmount USB partitions"*) safe_unmount_usb_device "${cand}" "${cb}" "${cand_bus:-usb}" "${cand_gb}" && break ;;
+          "Switch to --mode fs-archive"*) MODE="fs-archive"; break ;;
+        esac
+      fi
+    else break; fi
+    if [[ -t 0 && -z "${DEVICE}" ]]; then log_warn "${MSG_DISK_RETRY}"; TARGETS=(); continue; else exit 1; fi
+  fi
+  break
+done
+[[ "${#TARGETS[@]}" -eq 0 ]] && { log_info "No eligible external USB devices found."; exit 0; }
+if [[ -z "${OUT_DIR}" ]]; then
+  if [[ -t 0 ]]; then
+    log_info "${MSG_SCAN_DIRS}"; DIR_OPTS=()
+    while IFS= read -r dl; do
+      [[ -z "${dl}" ]] && continue; pc="${dl}"; while [[ ! -d "${pc}" && "${pc}" != "/" ]]; do pc="$(dirname "${pc}")"; done
+      av=$(df -h "${pc}" 2>/dev/null | awk 'NR==2 {print $4}' || echo "?")
+      [[ "${dl}" == "${SAVED_OUT_DIR:-}" ]] && DIR_OPTS+=("${dl} (free: ${av}) [default]") || DIR_OPTS+=("${dl} (free: ${av})")
+    done < <(discover_destination_dirs)
+    DIR_OPTS+=("[Custom directory path]")
+    dpick="$(tui_select "${MSG_SELECT_DIR}" "${DIR_OPTS[@]}")"
+    [[ "${dpick}" == "[Custom directory path]" ]] && read -rp "Destination path: " OUT_DIR </dev/tty || OUT_DIR="$(echo "${dpick}" | sed -E 's/ \(free: [^)]+\)( \[default\])?$//')"
+  else OUT_DIR="${SAVED_OUT_DIR:-${HOME}/Backups/usb-images}"; fi
+fi
+HOST_LABEL="${HOST}"; [[ "${HOST}" == "local" ]] && HOST_LABEL="$(hostname -s 2>/dev/null || echo local-host)"
+for target_dev in "${TARGETS[@]}"; do
+  validate_device_syntax "${target_dev}" || continue; DEV_BASE="$(basename "${target_dev}")"
+  check_device_exists "${target_dev}" || continue; check_not_system_disk "${DEV_BASE}" || continue
+  if [[ "${MODE}" == "raw" ]] && ! check_not_mounted "${target_dev}"; then
+    [[ "${AUTO_UNMOUNT}" -eq 1 ]] && { safe_unmount_usb_device "${target_dev}" "${DEV_BASE}" "usb" "0" || continue; } || continue
+  fi
+  if [[ "${OS_ONLY}" -eq 1 ]]; then
+    log_info "${MSG_OS_CHECK} (${target_dev})"; OS_SIG="$(detect_os_on_device "${target_dev}")"
+    [[ -z "${OS_SIG}" ]] && { log_info "${MSG_OS_SKIP} ${target_dev}"; continue; }
+    log_info "${MSG_OS_FOUND} ${OS_SIG}"
+  fi
+  DEV_BYTES=$(run_target "blockdev --getsize64 '${target_dev}' 2>/dev/null || echo 0"); DEV_GB=$((DEV_BYTES / 1024 / 1024 / 1024))
+  LAST_DEVICE="${target_dev}"; LAST_DEVICE_SIZE="${DEV_GB}GB"; save_state
+  PARENT_CHECK="${OUT_DIR}"; while [[ ! -d "${PARENT_CHECK}" && "${PARENT_CHECK}" != "/" ]]; do PARENT_CHECK="$(dirname "${PARENT_CHECK}")"; done
+  DEST_FREE_GB=$(( $(df -k "${PARENT_CHECK}" 2>/dev/null | awk 'NR==2 {print $4}' || echo 0) / 1024 / 1024 ))
+  SIZE_VERDICT="OK (${DEV_GB} GB source <= ${DEST_FREE_GB} GB free)"
+  (( DEV_GB > DEST_FREE_GB )) && SIZE_VERDICT="WARNING: Source (${DEV_GB} GB) > Destination Free (${DEST_FREE_GB} GB)!"
+  TIMESTAMP="$(date -u +%Y%m%d-%H%M%SZ)"; TARGET_SUBDIR="${OUT_DIR}/${HOST_LABEL}/${DEV_BASE}"
+  [[ "${MODE}" == "fs-archive" ]] && { EXT="tar.zst"; [[ "${COMPRESSOR}" == "gzip" ]] && EXT="tar.gz"; } || { EXT="img.zst"; [[ "${COMPRESSOR}" == "gzip" ]] && EXT="img.gz"; }
+  IMG_FILE="${TARGET_SUBDIR}/${HOST_LABEL}-${DEV_BASE}-${TIMESTAMP}.${EXT}"; SHA_FILE="${IMG_FILE}.sha256"; META_FILE="${IMG_FILE}.meta.txt"
+  echo ""; echo "${MSG_SUMMARY_HDR}"
+  echo "  Execution Mode: $( [[ "${EXECUTE}" -eq 1 ]] && printf "\033[1;31mEXECUTE (READ-WRITE OUTPUT)\033[0m" || printf "\033[1;32mDRY-RUN (READ-ONLY)\033[0m" )"
+  echo "  Target Host:    ${SSH_USER}@${HOST}"
+  echo "  Source Device:  ${target_dev} (${DEV_GB} GB / ${DEV_BYTES} bytes)"
+  echo "  Size Check:     ${SIZE_VERDICT}"
+  echo "  RAID/DOM Guard: PASSED (verified non-RAID, non-internal-DOM)"
+  echo "  Imaging Mode:   ${MODE} (compressor=${COMPRESSOR}, os-only=${OS_ONLY})"
+  echo "  Output File:    ${IMG_FILE}"
+  echo "------------------------------------"
+  [[ "${EXECUTE}" -eq 0 ]] && { log_info "[DRY-RUN] Verification complete. Zero bytes written."; continue; }
+  if [[ "${YES_FLAG}" -eq 0 && -t 0 ]]; then
+    read -rp "${MSG_CONFIRM_1}" C1 </dev/tty; [[ ! "${C1}" =~ ^([yY]|[yY][eE][sS]|[tT]|[tT][aA][kK])$ ]] && { log_info "${MSG_ABORT}"; continue; }
+    printf -v c2p "${MSG_CONFIRM_2}" "${IMG_FILE}"; read -rp "${c2p}" C2 </dev/tty; [[ "${C2}" != "YES" && "${C2}" != "TAK" ]] && { log_info "${MSG_ABORT}"; continue; }
+  fi
+  mkdir -p "${TARGET_SUBDIR}"
+  printf "package=usb-disk-imager\nversion=%s\nauthor=Krzysztof Zielinski\nmode=%s\nhost=%s\ndevice=%s\nbytes=%s\ntimestamp_utc=%s\n" "${VERSION}" "${MODE}" "${HOST_LABEL}" "${target_dev}" "${DEV_BYTES}" "${TIMESTAMP}" > "${META_FILE}"
+  log_info "${MSG_START_DUMP}"
+  [[ "${MODE}" == "fs-archive" ]] && stream_filtered_archive "${target_dev}" "${IMG_FILE}" "${SHA_FILE}" "${COMPRESSOR}" "${MAX_FILE_SIZE}" "${EXCLUDE_PATTERN}" || stream_raw_image "${target_dev}" "${IMG_FILE}" "${SHA_FILE}" "${COMPRESSOR}"
+  test -s "${SHA_FILE}"
+  printf -v rm_msg "${MSG_ROTATE}" "${KEEP_BACKUPS}"; log_info "${rm_msg}"
+  ls -1t "${TARGET_SUBDIR}/${HOST_LABEL}-${DEV_BASE}-"*."${EXT}" 2>/dev/null | tail -n +"$((KEEP_BACKUPS + 1))" | while read -r old; do rm -f "${old}" "${old}.sha256" "${old}.meta.txt"; done
+  log_info "${MSG_DONE} ${TARGET_SUBDIR}"; ls -lh "${IMG_FILE}" "${SHA_FILE}" "${META_FILE}"
+done
