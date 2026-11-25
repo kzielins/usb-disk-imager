@@ -89,7 +89,11 @@ stream_raw_image() {
   local device="$1" img_file="$2" sha_file="$3" compressor="$4" base; base="$(basename "${img_file}")"
   if [[ "${img_file}" == remote:* ]]; then
     local rpath="${img_file#remote:}"
-    run_target "mkdir -p '$(dirname "${rpath}")' && if command -v zstd >/dev/null 2>&1 && [ '${compressor}' = 'zstd' ]; then dd if='${device}' bs=4M status=none | tee >(sha256sum | awk -v f='${base}' '{print \$1 \"  \" f}' > '${rpath}.sha256') | zstd -T0 -3 -o '${rpath}'; else dd if='${device}' bs=4M status=none | tee >(sha256sum | awk -v f='${base}' '{print \$1 \"  \" f}' > '${rpath}.sha256') | gzip -6 > '${rpath}'; fi"
+    local rsha="${sha_file#remote:}"
+    [[ -z "${rsha}" || "${rsha}" == "${sha_file}" ]] && rsha="${rpath}.sha256"
+    local rdir; rdir="$(dirname "${rpath}")"
+    local rbase; rbase="$(basename "${rpath}")"
+    run_target "mkdir -p '${rdir}' && if command -v zstd >/dev/null 2>&1 && [ '${compressor}' = 'zstd' ]; then fifo=\$(mktemp -u /tmp/udi-sha.XXXXXX) && mkfifo \"\$fifo\" && (sha256sum < \"\$fifo\" | awk -v f='${rbase}' '{print \$1 \"  \" f}' > '${rsha}') & sha_pid=\$! && dd if='${device}' bs=4M | tee \"\$fifo\" | zstd -T0 -3 -f -o '${rpath}'; rc=\$?; wait \"\$sha_pid\" || rc=\$?; rm -f \"\$fifo\"; exit \$rc; else dd if='${device}' bs=4M | gzip -6 > '${rpath%.zst}.gz'; fi"
   elif [[ "${compressor}" == "zstd" ]]; then
     run_target "dd if='${device}' bs=4M status=none" | tee >(sha256_stream | awk -v f="${base}" '{print $1 "  " f}' > "${sha_file}") | zstd -T0 -3 -o "${img_file}"
   else
