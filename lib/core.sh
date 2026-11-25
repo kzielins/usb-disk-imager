@@ -113,3 +113,64 @@ stream_filtered_archive() {
     find . -type f $( [ -n "$MAX_SZ" ] && printf -- "-not -size +%s " "$MAX_SZ" ) $( [ -n "$EXCL" ] && printf -- "-not -name %s " "$EXCL" ) -print0 | tar --null -T - -cf -
 REMOTE_TAR
 }
+
+write_provenance_manifest() {
+  local target_dev="$1" dev_gb="$2" dev_bytes="$3" img_file="$4" sha_file="$5" mode="$6" compressor="$7" out_dir="$8"
+  local dev_base; dev_base="$(basename "${target_dev}")"
+  local ts_iso; ts_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local probe_info
+  probe_info=$(run_target "DEV='${target_dev}' B='${dev_base}' bash -s" << 'REMOTE_META' 2>/dev/null || echo "probe_unavailable"
+    echo "=== HOSTNAME ==="
+    hostname -f 2>/dev/null || hostname
+    echo "=== KERNEL ==="
+    uname -a
+    echo "=== SYSFS_DEVICE ==="
+    echo "model=$(cat /sys/block/${B}/device/model 2>/dev/null | tr -s ' ')"
+    echo "vendor=$(cat /sys/block/${B}/device/vendor 2>/dev/null | tr -s ' ')"
+    echo "serial=$(cat /sys/block/${B}/device/serial 2>/dev/null || udevadm info --query=property --name=${DEV} 2>/dev/null | grep -E 'ID_SERIAL|ID_MODEL|ID_FS' | tr '\n' ';')"
+    echo "sys_path=$(readlink -f /sys/block/${B} 2>/dev/null)"
+    echo "=== PARTITIONS ==="
+    fdisk -l "${DEV}" 2>/dev/null || parted -s "${DEV}" print 2>/dev/null || cat /proc/partitions | grep -E "${B}"
+    echo "=== BLKID ==="
+    blkid ${DEV}* 2>/dev/null || true
+REMOTE_META
+  )
+  local os_sig; os_sig="$(detect_os_on_device "${target_dev}" || true)"
+  local sha_val="DRY-RUN-NOT-WRITTEN"
+  if [[ "${img_file}" == remote:* ]]; then
+    local rsha="${img_file#remote:}.sha256"
+    sha_val=$(run_target "awk '{print \$1}' '${rsha}' 2>/dev/null || echo pending" || echo "pending")
+  elif [[ -f "${sha_file}" ]]; then
+    sha_val=$(awk '{print $1}' "${sha_file}")
+  fi
+
+  local md_body
+  md_body=$(cat << MANIFEST_MD
+# Disk / VM Image Provenance Manifest
+
+- **Created (UTC):** \`${ts_iso}\`
+- **Tool:** \`universal-usb-disk-imager v${VERSION:-2.2.3}\`
+- **Source Host:** \`${SSH_USER}@${HOST}\`
+- **Source Block Device:** \`${target_dev}\` (${dev_gb} GB / ${dev_bytes} bytes)
+- **Detected OS Signatures:** \`${os_sig:-none detected}\`
+- **Imaging Mode:** \`${mode}\` (compressor: \`${compressor}\`)
+- **Destination Folder:** \`${out_dir}\`
+- **Image Artifact:** \`${img_file}\`
+- **SHA256 Checksum:** \`${sha_val}\`
+
+## Hardware & Partition Inspection
+
+\`\`\`text
+${probe_info}
+\`\`\`
+MANIFEST_MD
+)
+  if [[ "${img_file}" == remote:* ]]; then
+    local rbase="${img_file#remote:}"
+    printf "%s\n" "${md_body}" | run_target "cat > '${rbase}.manifest.md'"
+  else
+    local lbase="${img_file#local:}"
+    printf "%s\n" "${md_body}" > "${lbase}.manifest.md"
+  fi
+  log_info "Provenance manifest written: ${img_file}.manifest.md"
+}

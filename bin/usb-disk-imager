@@ -49,7 +49,7 @@ if [[ -f "${PKG_DIR}/i18n/${LANG_CODE}.sh" ]]; then source "${PKG_DIR}/i18n/${LA
 source "${PKG_DIR}/lib/tui.sh"; source "${PKG_DIR}/lib/core.sh"; source "${PKG_DIR}/lib/guards.sh"
 command -v zstd >/dev/null 2>&1 || COMPRESSOR="gzip"
 LOG_STATUS="DISABLED (not writable)"; [[ -w "${LOG_DIR}" ]] && LOG_STATUS="ACTIVE -> ${LOG_FILE}"
-LAST_RUN_SUMMARY="none (first run)"; [[ -n "${SAVED_HOST:-}" ]] && LAST_RUN_SUMMARY="${SAVED_USER:-admin}@${SAVED_HOST} \vert{}${SAVED_DEVICE:-?} (${SAVED_DEVICE_SIZE:-?}) ->${SAVED_OUT_DIR:-?}"
+LAST_RUN_SUMMARY="none (first run)"; [[ -n "${SAVED_HOST:-}" ]] && LAST_RUN_SUMMARY="${SAVED_USER:-admin}@${SAVED_HOST} |${SAVED_DEVICE:-?} (${SAVED_DEVICE_SIZE:-?}) ->${SAVED_OUT_DIR:-?}"
 echo "================================================================================"
 echo "  UNIVERSAL USB DISK IMAGER v${VERSION} | Non-Destructive SSH & Local Backup Engine"
 echo "  Log File:  ${LOG_STATUS}"
@@ -65,18 +65,18 @@ fi
 echo "================================================================================"
 select_host_interactive() {
   log_info "${MSG_SCAN_HOSTS}"; local opts=()
-  while IFS= read -r h; do [[ -z "${h}" ]] && continue; [[ "${h}" == "${SAVED_HOST:-}" ]] && opts+=("${h} [last run]") \vert{}\vert{} opts+=("${h}"); done < <(discover_candidate_hosts)
+  while IFS= read -r h; do [[ -z "${h}" ]] && continue; [[ "${h}" == "${SAVED_HOST:-}" ]] && opts+=("${h} [last run]") || opts+=("${h}"); done < <(discover_candidate_hosts)
   opts+=("[Custom hostname/IP]")
-  local choice; choice="$(tui_select "${MSG_SELECT_HOST}" "${opts[@]}")"; choice="${choice% [last run]}"
-  [[ "${choice}" == "[Custom hostname/IP]" ]] && read -rp "Hostname / IP: " HOST </dev/tty \vert{}\vert{} HOST="${choice}"
+  local choice; choice="$(tui_select "${MSG_SELECT_HOST}" "${opts[@]}")"; choice="${choice%% *}"
+  [[ "${choice}" == "[Custom hostname/IP]" ]] && read -rp "Hostname / IP: " HOST </dev/tty || HOST="${choice}"
   save_state
 }
 select_user_interactive() {
   local opts=()
-  while IFS= read -r u; do [[ -z "${u}" ]] && continue; [[ "${u}" == "${SAVED_USER:-}" ]] && opts+=("${u} [last run]") \vert{}\vert{} opts+=("${u}"); done < <(discover_candidate_users)
+  while IFS= read -r u; do [[ -z "${u}" ]] && continue; [[ "${u}" == "${SAVED_USER:-}" ]] && opts+=("${u} [last run]") || opts+=("${u}"); done < <(discover_candidate_users)
   opts+=("[Custom SSH username]")
   local p; printf -v p "${MSG_SELECT_USER}" "${HOST}"
-  local choice; choice="$(tui_select "${p}" "${opts[@]}")"; choice="${choice% [last run]}"
+  local choice; choice="$(tui_select "${p}" "${opts[@]}")"; choice="${choice%% *}"
   [[ "${choice}" == "[Custom SSH username]" ]] && read -rp "SSH username: " SSH_USER </dev/tty || SSH_USER="${choice}"
   save_state
 }
@@ -85,7 +85,7 @@ if [[ -z "${HOST}" ]]; then
   else [[ "${EXECUTE}" -eq 0 ]] && { log_info "[DRY-RUN] No --host supplied. Exiting cleanly."; exit 0; }; log_err "Target host required."; exit 1; fi
 fi
 if [[ "${HOST}" != "local" ]]; then
-  if [[ "${USER_EXPLICIT}" -eq 0 ]]; then [[ -t 0 ]] && select_user_interactive \vert{}\vert{} SSH_USER="${SAVED_USER:-admin}"; fi
+  if [[ "${USER_EXPLICIT}" -eq 0 ]]; then [[ -t 0 ]] && select_user_interactive || SSH_USER="${SAVED_USER:-admin}"; fi
   while ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${SSH_USER}@${HOST}" "echo ok" >/dev/null 2>&1; do
     log_warn "SSH connection failed for ${SSH_USER}@${HOST}."
     if [[ -t 0 ]]; then
@@ -165,17 +165,24 @@ FIRST_GB=$((FIRST_BYTES / 1024 / 1024 / 1024))
 LAST_DEVICE="${FIRST_DEV}"; LAST_DEVICE_SIZE="${FIRST_GB}GB"; save_state
 if [[ -z "${OUT_DIR}" ]]; then
   if [[ -t 0 ]]; then
+    SCAN_DEPTH=4
     while true; do
       NEXT_DEPTH=$((SCAN_DEPTH + 1))
-      log_info "${MSG_SCAN_DIRS} (depth=${SCAN_DEPTH}, source=${FIRST_GB}GB, roots: NAS /share/* + local ~/Backups, /Volumes)"
+      log_info "${MSG_SCAN_DIRS} (depth=${SCAN_DEPTH}, source=${FIRST_GB}GB)"
       DIR_OPTS=(); DIR_CNT=0
       while IFS='|' read -r dpath dfree dnote; do
         [[ -z "${dpath}" ]] && continue
         if [[ "${dfree}" =~ ^[0-9]+$ ]]; then
-          if (( FIRST_GB > dfree )); then cmp_tag="free: ${dfree}GB vs src: ${FIRST_GB}GB -> [TOO SMALL!]"
-          else cmp_tag="free: ${dfree}GB vs src: ${FIRST_GB}GB -> OK"; fi
-        else cmp_tag="${dfree}"; fi
-        [[ "${dpath}" == "${SAVED_OUT_DIR:-}" ]] && DIR_OPTS[${DIR_CNT}]="${dpath} (${cmp_tag}) [${dnote}] [last run]" || DIR_OPTS[${DIR_CNT}]="${dpath} (${cmp_tag}) [${dnote}]"
+          if (( FIRST_GB > dfree )); then
+            lbl="${dpath}  [${dfree}GB < ${FIRST_GB}GB TOO SMALL] (${dnote})"
+          else
+            lbl="${dpath}  [${dfree}GB OK] (${dnote})"
+          fi
+        else
+          lbl="${dpath} (${dnote})"
+        fi
+        [[ "${dpath}" == "${SAVED_OUT_DIR:-}" ]] && lbl="${lbl} [last run]"
+        DIR_OPTS[${DIR_CNT}]="${lbl}"
         DIR_CNT=$((DIR_CNT + 1))
       done < <(scan_smart_destinations "${SCAN_DEPTH}")
       DEEPER_LABEL="[Scan deeper (+1 -> depth ${NEXT_DEPTH}, current=${SCAN_DEPTH}) for VMware/disk images]"
@@ -183,11 +190,31 @@ if [[ -z "${OUT_DIR}" ]]; then
       DIR_OPTS[${DIR_CNT}]="[Custom directory path]"
       dpick="$(tui_select "${MSG_SELECT_DIR}" "${DIR_OPTS[@]}")"
       if [[ "${dpick}" == "${DEEPER_LABEL}" ]]; then SCAN_DEPTH=$((SCAN_DEPTH + 1)); continue
-      elif [[ "${dpick}" == "[Custom directory path]" ]]; then read -rp "Destination path (local:/path or remote:/share/...): " OUT_DIR </dev/tty; break
-      else OUT_DIR="$(echo "${dpick}" | sed -E 's/ \(free:.*$//')"; break; fi
+      elif [[ "${dpick}" == "[Custom directory path]" ]]; then
+        read -rp "Destination path (local:/path or remote:/share/...): " BASE_DIR </dev/tty; break
+      else
+        BASE_DIR="${dpick%%  *}"; break
+      fi
     done
+    HOST_TMP="${HOST}"; [[ "${HOST}" == "local" ]] && HOST_TMP="$(hostname -s 2>/dev/null || echo local)"
+    DEV_TMP="$(basename "${FIRST_DEV}")"
+    OS_HINT="$(detect_os_on_device "${FIRST_DEV}" 2>/dev/null | awk '{print $1}' | sed 's/(.*)//' | tr -cd 'A-Za-z0-9_-' || true)"
+    SUGGEST_NAME="${HOST_TMP}-${DEV_TMP}${OS_HINT:+-${OS_HINT}}-$(date -u +%Y%m%d)"
+    NAME_CHOICE="$(tui_select "Dedicated VM / backup subfolder inside ${BASE_DIR}:" \
+      "${SUGGEST_NAME} (create new VM subfolder - recommended)" \
+      "[Enter custom VM / backup subfolder name]")"
+    case "${NAME_CHOICE}" in
+      "${SUGGEST_NAME}"*) VM_FOLDER="${SUGGEST_NAME}" ;;
+      *)
+        read -rp "Custom VM / backup subfolder name (e.g. win10-p50-usb): " CUSTOM_VM </dev/tty
+        CUSTOM_VM="$(echo "${CUSTOM_VM}" | tr -cd 'A-Za-z0-9._-')"
+        VM_FOLDER="${CUSTOM_VM:-${SUGGEST_NAME}}"
+        ;;
+    esac
+    OUT_DIR="${BASE_DIR%/}/${VM_FOLDER}"
   else OUT_DIR="${SAVED_OUT_DIR:-local:${HOME}/Backups/usb-images}"; fi
 fi
+
 save_state
 HOST_LABEL="${HOST}"; [[ "${HOST}" == "local" ]] && HOST_LABEL="$(hostname -s 2>/dev/null || echo local-host)"
 while IFS= read -r target_dev; do
@@ -206,16 +233,16 @@ while IFS= read -r target_dev; do
   LAST_DEVICE="${target_dev}"; LAST_DEVICE_SIZE="${DEV_GB}GB"; save_state
   CLEAN_OUT="${OUT_DIR#local:}"; CLEAN_OUT="${CLEAN_OUT#remote:}"
   if [[ "${OUT_DIR}" == remote:* ]]; then
-    DEST_FREE_GB=$(run_target "p='${CLEAN_OUT}'; while [ ! -d \"\$p\" ] && [ \"\$p\" != '/' ]; do p=\$(dirname \"\$p\"); done; df -k \"\$p\" 2>/dev/null | awk 'NR==2 {print int(\$4/1024/1024)}'" || echo 0)
+    DEST_FREE_GB=$(run_target "p='${CLEAN_OUT}'; while [ ! -d \"\$p\" ] && [ \"\$p\" != '/' ]; do p=\$(dirname \"\$p\"); done; df -Pk \"\$p\" 2>/dev/null | awk 'END {if (NF>=6) print int(\$(NF-2)/1024/1024); else print 0}'" || echo 0)
   else
     PARENT_CHECK="${CLEAN_OUT}"; while [[ ! -d "${PARENT_CHECK}" && "${PARENT_CHECK}" != "/" ]]; do PARENT_CHECK="$(dirname "${PARENT_CHECK}")"; done
     DEST_FREE_GB=$(( $(df -k "${PARENT_CHECK}" 2>/dev/null | awk 'NR==2 {print $4}' || echo 0) / 1024 / 1024 ))
   fi
   SIZE_VERDICT="OK (${DEV_GB} GB source <= ${DEST_FREE_GB} GB destination free)"
   (( DEV_GB > DEST_FREE_GB )) && SIZE_VERDICT="CRITICAL WARNING: Source (${DEV_GB} GB) > Destination Free (${DEST_FREE_GB} GB)!"
-  TIMESTAMP="$(date -u +%Y%m%d-%H%M%SZ)"; TARGET_SUBDIR="${OUT_DIR}/${HOST_LABEL}/${DEV_BASE}"
+  TIMESTAMP="$(date -u +%Y%m%d-%H%M%SZ)"; TARGET_SUBDIR="${OUT_DIR}"
   [[ "${MODE}" == "fs-archive" ]] && { EXT="tar.zst"; [[ "${COMPRESSOR}" == "gzip" ]] && EXT="tar.gz"; } || { EXT="img.zst"; [[ "${COMPRESSOR}" == "gzip" ]] && EXT="img.gz"; }
-  IMG_FILE="${TARGET_SUBDIR}/${HOST_LABEL}-${DEV_BASE}-${TIMESTAMP}.${EXT}"; SHA_FILE="${IMG_FILE#local:}.sha256"; META_FILE="${IMG_FILE#local:}.meta.txt"
+  IMG_FILE="${TARGET_SUBDIR}/$(basename "${TARGET_SUBDIR}")-${TIMESTAMP}.${EXT}"; SHA_FILE="${IMG_FILE#local:}.sha256"; META_FILE="${IMG_FILE#local:}.meta.txt"
   echo ""; echo "${MSG_SUMMARY_HDR}"
   echo "  Execution Mode: $( [[ "${EXECUTE}" -eq 1 ]] && printf "\033[1;31mEXECUTE (READ-WRITE OUTPUT)\033[0m" || printf "\033[1;32mDRY-RUN (READ-ONLY)\033[0m" )"
   echo "  Log File:       ${LOG_FILE}"
@@ -227,8 +254,29 @@ while IFS= read -r target_dev; do
   echo "  RAID/DOM Guard: PASSED (verified non-RAID, non-internal-DOM)"
   echo "  Imaging Mode:   ${MODE} (compressor=${COMPRESSOR}, os-only=${OS_ONLY})"
   echo "  Output File:    ${IMG_FILE}"
+  echo "  Manifest File:  ${IMG_FILE}.manifest.md"
   echo "------------------------------------"
-  [[ "${EXECUTE}" -eq 0 ]] && { log_info "[DRY-RUN] Verification complete. Zero bytes written."; continue; }
+  if [[ "${EXECUTE}" -eq 0 ]]; then
+    CLI_CMD="./bin/usb-disk-imager --host ${HOST} --user ${SSH_USER} --device ${target_dev} --out-dir ${TARGET_SUBDIR} --mode ${MODE} --lang ${LANG_CODE} --execute"
+    echo ""
+    printf "  [1;33mCommand to run directly without wizard:[0m
+"
+    echo "    ${CLI_CMD}"
+    echo "  Logs: ${LOG_FILE} | ${TRACE_FILE}"
+    echo "------------------------------------"
+    log_info "[DRY-RUN] Verification complete. Zero bytes written."
+    if [[ -t 0 && "${YES_FLAG}" -eq 0 ]]; then
+      read -rp "Proceed to EXECUTE (write image + SHA256 + manifest) now? [yes/No] (default: No): " GO_EXEC </dev/tty
+      if [[ "${GO_EXEC}" =~ ^([yY][eE][sS]|[tT][aA][kK])$ ]]; then
+        EXECUTE=1
+        log_info "User confirmed transition from DRY-RUN to EXECUTE."
+      else
+        continue
+      fi
+    else
+      continue
+    fi
+  fi
   if (( DEV_GB > DEST_FREE_GB )) && [[ "${YES_FLAG}" -eq 0 ]]; then
     log_err "Refusing write: Source (${DEV_GB} GB) exceeds destination free space (${DEST_FREE_GB} GB). Use --yes to override."
     continue
@@ -245,5 +293,6 @@ while IFS= read -r target_dev; do
     [[ "${IMG_FILE}" != remote:* ]] && mkdir -p "${TARGET_SUBDIR#local:}"
     stream_raw_image "${target_dev}" "${IMG_FILE#local:}" "${SHA_FILE}" "${COMPRESSOR}"
   fi
+  write_provenance_manifest "${target_dev}" "${DEV_GB}" "${DEV_BYTES}" "${IMG_FILE}" "${SHA_FILE}" "${MODE}" "${COMPRESSOR}" "${TARGET_SUBDIR}"
   log_info "${MSG_DONE} ${TARGET_SUBDIR}"
 done <<< "${TARGET_LIST}"
