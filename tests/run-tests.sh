@@ -4,7 +4,9 @@ export XDG_STATE_HOME="$(mktemp -d)" XDG_CONFIG_HOME="$(mktemp -d)"
 PKG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; BIN="${PKG_DIR}/bin/usb-disk-imager"
 log_info() { :; }; log_err() { :; }; run_target() { echo ""; }
 echo "[1/7] Version & help..."
-"${BIN}" --version | grep >/dev/null "2.2.6"
+"${BIN}" --version | grep >/dev/null "2.2.7"
+grep -q "detach_raw_image_on_nas" "${PKG_DIR}/lib/core.sh"
+grep -q "UDI_DETACHED" "${PKG_DIR}/bin/usb-disk-imager"
 # QNAP BusyBox has no mkfifo — pipeline must not require it
 if grep -nE '^[^#]*\bmkfifo\b' "${PKG_DIR}/lib/image-pipeline.sh"; then
   echo "FAIL: image-pipeline.sh must not call mkfifo (QNAP)"; exit 1
@@ -22,8 +24,9 @@ test -f "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
 grep -q "cd ~/src/usb-disk-imager" "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
 grep -q "git reset --hard origin/main" "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
 grep -q "./bin/usb-disk-imager --host" "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
-grep -q "screen -S udi-dump" "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
+grep -q "DETACHED\|detach\|screen -r udi-sdc" "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
 grep -q "udi-status" "${PKG_DIR}/README.md"
+grep -q "2.2.7" "${PKG_DIR}/README.md"
 grep -q 'mkdir -p' "${PKG_DIR}/bin/udi-rsync-run"
 # udi-status: parse synthetic progress (real % formula)
 TMPJ=$(mktemp -d)
