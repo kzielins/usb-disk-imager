@@ -12,6 +12,9 @@ test -x "${PKG_DIR}/bin/udi-rsync-run"
 "${PKG_DIR}/bin/udi-rsync-run" --help | grep >/dev/null "screen-detach"
 test -f "${PKG_DIR}/lib/image-pipeline.sh"
 test -f "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
+grep -q "git pull origin main" "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
+grep -q "cd ~/src/usb-disk-imager" "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
+grep -q "git pull origin main" "${PKG_DIR}/README.md"
 # udi-status: parse synthetic progress (real % formula)
 TMPJ=$(mktemp -d)
 cat > "${TMPJ}/demo.img.zst.progress" << 'P'

@@ -22,12 +22,15 @@ Percent formula (same as the imager):
   where read_bytes = dd position on the block device (/proc/.../fdinfo)
   (compressed .img.zst size is NOT the percent — it is shown separately)
 
+ALWAYS on Mac first:
+  cd ~/src/usb-disk-imager
+  git pull origin main
+
 Examples:
-  # Auto-pick latest job in the output folder (recommended)
+  cd ~/src/usb-disk-imager && git pull origin main
   ./bin/udi-status --host my-nas --user admin \
     --dir /share/homes/USER/images_vmware/job --watch
 
-  # Point at one image / .progress file
   ./bin/udi-status --host my-nas --user admin \
     --file /share/homes/USER/images_vmware/job/NAME.img.zst
 USAGE

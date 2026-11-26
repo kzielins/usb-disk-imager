@@ -24,7 +24,12 @@ usage() {
 Usage: udi-rsync-run --host <nas> --user admin --device /dev/sdX \
          --out-dir /share/.../job-folder [OPTIONS]
 
-From your Mac: rsync this checkout to the NAS, then start imaging ON the NAS
+ALWAYS on Mac first:
+  cd /path/to/usb-disk-imager
+  git pull origin main
+  ./bin/udi-rsync-run ...
+
+Then: rsync this checkout to the NAS and start imaging ON the NAS
 (--host local there) so laptop sleep / Tailscale flaps do not kill the dump.
 
 Required:
@@ -48,24 +53,27 @@ Other:
       --dry-sync            Show rsync -n, do not copy / start job
   -h, --help                This help
 
-Examples:
-  # 1) Sync + detached screen (recommended) — then close the Mac lid
+Examples (each starts with cd + git pull):
+  cd ~/src/usb-disk-imager && git pull origin main
+
+  # 1) Sync + detached screen (recommended)
   ./bin/udi-rsync-run --host my-nas --user admin --device /dev/sdc \
     --out-dir /share/homes/USER/images_vmware/job \
     --remote-dir /share/homes/USER/ops/usb-disk-imager \
     --approach screen-detach --execute --yes
 
-  # 2) Sync + nohup (if screen is missing / TERM broken)
+  # 2) Sync + nohup
   ./bin/udi-rsync-run --host my-nas --user admin --device /dev/sdc \
     --out-dir /share/homes/USER/images_vmware/job \
     --approach nohup --execute --yes
 
-  # 3) Sync + attach to screen now (Ctrl-A D to detach later)
+  # 3) Sync + attach to screen (Ctrl-A D later)
   ./bin/udi-rsync-run --host my-nas --user admin --device /dev/sdc \
     --out-dir /share/homes/USER/images_vmware/job \
     --approach screen-attach --execute --yes
 
-After start, from another Mac terminal (REAL % = read/total device bytes):
+After start (REAL % = read/total device bytes):
+  cd ~/src/usb-disk-imager && git pull origin main
   ./bin/udi-status --host my-nas --user admin --dir /share/.../job-folder --watch
 USAGE
 }
