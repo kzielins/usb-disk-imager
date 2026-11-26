@@ -4,7 +4,11 @@ export XDG_STATE_HOME="$(mktemp -d)" XDG_CONFIG_HOME="$(mktemp -d)"
 PKG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; BIN="${PKG_DIR}/bin/usb-disk-imager"
 log_info() { :; }; log_err() { :; }; run_target() { echo ""; }
 echo "[1/7] Version & help..."
-"${BIN}" --version | grep >/dev/null "2.2.5"
+"${BIN}" --version | grep >/dev/null "2.2.6"
+# QNAP BusyBox has no mkfifo — pipeline must not require it
+if grep -nE '^[^#]*\bmkfifo\b' "${PKG_DIR}/lib/image-pipeline.sh"; then
+  echo "FAIL: image-pipeline.sh must not call mkfifo (QNAP)"; exit 1
+fi
 "${BIN}" --help | grep >/dev/null "usb-disk-imager"
 test -x "${PKG_DIR}/bin/udi-status"
 "${PKG_DIR}/bin/udi-status" --help | grep >/dev/null "read_bytes"
