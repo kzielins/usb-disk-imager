@@ -1,6 +1,6 @@
 # usb-disk-imager
 
-**Author:** Krzysztof Zielinski ([github.com/kzielins](https://github.com/kzielins)) | **License:** MIT | **Version:** 2.2.6
+**Author:** Krzysztof Zielinski ([github.com/kzielins](https://github.com/kzielins)) | **License:** MIT | **Version:** 2.2.7
 
 Non-destructive CLI/TUI: compressed, SHA256-verified USB disk images over SSH or on the NAS.
 
@@ -8,22 +8,21 @@ Non-destructive CLI/TUI: compressed, SHA256-verified USB disk images over SSH or
 
 Pełny opis: **[docs/HOWTO-MAC-TO-NAS.md](docs/HOWTO-MAC-TO-NAS.md)**
 
+**v2.2.7:** interaktywny wybór na Macu → po EXECUTE dump leci **detached na NAS** (`screen udi-sdc`). Mac możesz odłączyć; monitoruj `udi-status`.
+
 ```bash
 cd ~/src/usb-disk-imager
 git fetch origin && git checkout main && git reset --hard origin/main
 
-# 1) TUI jak wcześniej (z Maca)
+# Interaktywne menu (plan) — execute odstawia job na NAS
 ./bin/usb-disk-imager --host kznas3-1 --user admin --lang pl
 
-# 2) ALBO to samo TUI w screen na NAS (długi dump w tle):
-ssh admin@kznas3-1 'mkdir -p /share/homes/kzielins/ops/usb-disk-imager'
-rsync -avz --delete --exclude .git ./ admin@kznas3-1:/share/homes/kzielins/ops/usb-disk-imager/
-ssh -t admin@kznas3-1 'export TERM=vt100; cd /share/homes/kzielins/ops/usb-disk-imager; screen -S udi-dump ./bin/usb-disk-imager --host local --lang pl'
-# Ctrl-A D = detach
-
-# 3) % status z Maca
+# Monitor (Mac nie musi trzymać SSH dumpa)
 ./bin/udi-status --host kznas3-1 --user admin \
-  --dir /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125 --watch
+  --dir /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261126 --watch
+
+# Opcjonalnie podejrzyj screen na NAS
+ssh -t admin@kznas3-1 'export TERM=vt100; screen -r udi-sdc'
 ```
 
 ## Notes

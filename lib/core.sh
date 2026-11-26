@@ -107,7 +107,13 @@ _udi_pipeline_path() {
   printf "%s" "${here}/image-pipeline.sh"
 }
 
-# Run imaging pipeline on target (NAS) or locally. Progress = read/total bytes.
+# Set by detach_raw_image_on_nas when the long job was started on the NAS
+# (Mac must NOT keep an SSH pipe open for hours).
+UDI_DETACHED=0
+UDI_DETACH_SESSION=""
+UDI_DETACH_DIR=""
+
+# Run imaging pipeline in the foreground on THIS machine (HOST=local / already on NAS).
 _udi_run_image_pipeline() {
   local device="$1" rpath="$2" rsha="$3" compressor="$4" total_bytes="$5"
   local rdir rbase rprog pipe
@@ -116,31 +122,94 @@ _udi_run_image_pipeline() {
   rprog="${rpath}.progress"
   pipe="$(_udi_pipeline_path)"
   log_info "Progress file: ${rprog}  (percent = bytes read / device size)"
-  log_info "Status: ./bin/udi-status --host ${HOST:-local} --user ${SSH_USER:-admin} --dir '${rdir}' --watch"
+  log_info "Status: ./bin/udi-status --host local --dir '${rdir}' --watch"
   local env_prefix="DEV='${device}' RPATH='${rpath}' RSHA='${rsha}' RPROG='${rprog}' RBASE='${rbase}' COMP='${compressor}' TOTAL='${total_bytes}' RDIR='${rdir}' DEVICE_LABEL='${device}' JOB_FILE='${rdir}/.udi-job'"
-  if [[ "${HOST}" == "local" ]]; then
-    # Tool is already on the NAS (or local Linux) — run pipeline file directly.
-    bash -c "${env_prefix} bash '${pipe}'"
-  else
-    # Stream pipeline script over SSH (no need for prior install on NAS).
-    run_target_live "${env_prefix} bash -s" < "${pipe}"
+  bash -c "${env_prefix} bash '${pipe}'"
+}
+
+# Upload pipeline + start screen/nohup ON THE NAS, then return immediately.
+# Survives Mac sleep / Tailscale disconnect.
+detach_raw_image_on_nas() {
+  local device="$1" rpath="$2" rsha="$3" compressor="$4" total_bytes="$5"
+  local rdir rbase rprog pipe session log remote_pipe
+  rdir="$(dirname "${rpath}")"
+  rbase="$(basename "${rpath}")"
+  rprog="${rpath}.progress"
+  pipe="$(_udi_pipeline_path)"
+  session="udi-$(basename "${device}")"
+  log="${rdir}/udi-run.log"
+  remote_pipe="/tmp/udi-image-pipeline.${session}.sh"
+
+  log_info "Starting DETACHED job on NAS screen '${session}' (not tied to this Mac SSH)."
+  log_info "Progress: ${rprog}"
+  log_info "Log:      ${log}"
+
+  # Create dirs + install pipeline script on NAS (stdin = local file).
+  ssh -o BatchMode=yes -o ConnectTimeout=10 \
+    -o ServerAliveInterval=30 -o ServerAliveCountMax=12 \
+    "${SSH_USER}@${HOST}" "mkdir -p $(printf '%q' "${rdir}")" || return 1
+  ssh -o BatchMode=yes -o ConnectTimeout=10 \
+    "${SSH_USER}@${HOST}" "cat > $(printf '%q' "${remote_pipe}")" < "${pipe}" || return 1
+
+  # Launch screen -dmS (preferred) or nohup. Job keeps running after this SSH exits.
+  ssh -o BatchMode=yes -o ConnectTimeout=10 \
+    "${SSH_USER}@${HOST}" bash -s -- \
+    "${device}" "${rpath}" "${rsha}" "${rprog}" "${rbase}" "${compressor}" "${total_bytes}" \
+    "${rdir}" "${session}" "${log}" "${remote_pipe}" << 'REMOTE_DETACH'
+set -eu
+DEV="$1"; RPATH="$2"; RSHA="$3"; RPROG="$4"; RBASE="$5"; COMP="$6"; TOTAL="$7"
+RDIR="$8"; SESSION="$9"; LOG="${10}"; PIPE="${11}"
+export TERM=vt100
+mkdir -p "${RDIR}"
+# Drop stale session with same name
+if command -v screen >/dev/null 2>&1; then
+  if screen -ls 2>/dev/null | grep -q "[.]${SESSION}[[:space:]]"; then
+    screen -S "${SESSION}" -X quit 2>/dev/null || true
+    sleep 1
   fi
+  # shellcheck disable=SC2086
+  screen -dmS "${SESSION}" bash -lc "export DEV='${DEV}' RPATH='${RPATH}' RSHA='${RSHA}' RPROG='${RPROG}' RBASE='${RBASE}' COMP='${COMP}' TOTAL='${TOTAL}' RDIR='${RDIR}' DEVICE_LABEL='${DEV}' JOB_FILE='${RDIR}/.udi-job' STARTED_UTC=\$(date -u +%Y-%m-%dT%H:%M:%SZ); bash '${PIPE}' >> '${LOG}' 2>&1; ec=\$?; echo EXIT:\$ec >> '${LOG}'; exec bash"
+  sleep 2
+  screen -ls || true
+  echo "DETACH_OK screen=${SESSION}"
+else
+  nohup bash -c "export DEV='${DEV}' RPATH='${RPATH}' RSHA='${RSHA}' RPROG='${RPROG}' RBASE='${RBASE}' COMP='${COMP}' TOTAL='${TOTAL}' RDIR='${RDIR}' DEVICE_LABEL='${DEV}' JOB_FILE='${RDIR}/.udi-job'; bash '${PIPE}'" >> "${LOG}" 2>&1 &
+  echo $! > "${RDIR}/udi-run.pid"
+  sleep 2
+  echo "DETACH_OK nohup pid=$(cat "${RDIR}/udi-run.pid")"
+fi
+# Show first log lines if any
+tail -n 20 "${LOG}" 2>/dev/null || true
+REMOTE_DETACH
+  local rc=$?
+  [[ "${rc}" -eq 0 ]] || return "${rc}"
+
+  UDI_DETACHED=1
+  UDI_DETACH_SESSION="${session}"
+  UDI_DETACH_DIR="${rdir}"
+  log_info "NAS job detached. Mac may disconnect NOW."
+  log_info "Monitor:  ./bin/udi-status --host ${HOST} --user ${SSH_USER} --dir '${rdir}' --watch"
+  log_info "Attach:   ssh -t ${SSH_USER}@${HOST} 'export TERM=vt100; screen -r ${session}'"
+  log_info "Log tail: ssh ${SSH_USER}@${HOST} 'tail -f ${log}'"
+  return 0
 }
 
 stream_raw_image() {
   local device="$1" img_file="$2" sha_file="$3" compressor="$4" total_bytes="${5:-0}"
   local base; base="$(basename "${img_file}")"
+  UDI_DETACHED=0
   if [[ "${img_file}" == remote:* ]]; then
     local rpath="${img_file#remote:}"
     local rsha="${sha_file#remote:}"
     [[ -z "${rsha}" || "${rsha}" == "${sha_file}" ]] && rsha="${rpath}.sha256"
-    _udi_run_image_pipeline "${device}" "${rpath}" "${rsha}" "${compressor}" "${total_bytes}"
+    # Always detach to NAS screen/nohup — never keep Mac SSH open for multi-hour dd.
+    detach_raw_image_on_nas "${device}" "${rpath}" "${rsha}" "${compressor}" "${total_bytes}"
   elif [[ "${HOST}" == "local" ]]; then
     local lpath="${img_file}" lsha="${sha_file}"
     [[ -z "${lsha}" ]] && lsha="${lpath}.sha256"
     _udi_run_image_pipeline "${device}" "${lpath}" "${lsha}" "${compressor}" "${total_bytes}"
   elif [[ "${compressor}" == "zstd" ]]; then
-    log_info "Streaming device→operator host (prefer udi-rsync-run / --host local for multi-hour jobs)..."
+    log_info "Streaming device→operator host (not durable — prefer remote:/ out-dir to detach on NAS)..."
     run_target_live "dd if='${device}' bs=4M 2>/dev/null" \
       | tee >(sha256_stream | awk -v f="${base}" '{print $1 "  " f}' > "${sha_file}") \
       | zstd -T0 -3 -o "${img_file}"
