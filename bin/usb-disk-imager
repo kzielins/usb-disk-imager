@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Author: Krzysztof Zielinski <https://github.com/kzielins>
 set -euo pipefail
-VERSION="2.2.3"
+VERSION="2.2.4"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${PKG_DIR}/lib/discovery.sh"; load_saved_state
@@ -286,12 +286,17 @@ while IFS= read -r target_dev; do
     printf -v c2p "${MSG_CONFIRM_2}" "${IMG_FILE}"; read -rp "${c2p}" C2 </dev/tty; [[ "${C2}" != "YES" && "${C2}" != "TAK" ]] && { log_info "${MSG_ABORT}"; continue; }
   fi
   log_info "${MSG_START_DUMP}"
+  img_rc=0
   if [[ "${MODE}" == "fs-archive" ]]; then
     mkdir -p "${TARGET_SUBDIR#local:}"
-    stream_filtered_archive "${target_dev}" "${IMG_FILE}" "${SHA_FILE}" "${COMPRESSOR}" "${MAX_FILE_SIZE}" "${EXCLUDE_PATTERN}"
+    stream_filtered_archive "${target_dev}" "${IMG_FILE}" "${SHA_FILE}" "${COMPRESSOR}" "${MAX_FILE_SIZE}" "${EXCLUDE_PATTERN}" || img_rc=$?
   else
     [[ "${IMG_FILE}" != remote:* ]] && mkdir -p "${TARGET_SUBDIR#local:}"
-    stream_raw_image "${target_dev}" "${IMG_FILE#local:}" "${SHA_FILE}" "${COMPRESSOR}"
+    stream_raw_image "${target_dev}" "${IMG_FILE#local:}" "${SHA_FILE}" "${COMPRESSOR}" "${DEV_BYTES}" || img_rc=$?
+  fi
+  if [[ "${img_rc}" -ne 0 ]]; then
+    log_err "Imaging FAILED (rc=${img_rc}). Not marking success. See progress/log on target."
+    continue
   fi
   write_provenance_manifest "${target_dev}" "${DEV_GB}" "${DEV_BYTES}" "${IMG_FILE}" "${SHA_FILE}" "${MODE}" "${COMPRESSOR}" "${TARGET_SUBDIR}"
   log_info "${MSG_DONE} ${TARGET_SUBDIR}"
