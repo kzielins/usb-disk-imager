@@ -6,16 +6,21 @@ Non-destructive CLI/TUI: compressed, SHA256-verified raw images of USB disks ove
 
 ## Operator path (Mac → NAS)
 
-**Full copy-paste:** **[docs/HOWTO-MAC-TO-NAS.md](docs/HOWTO-MAC-TO-NAS.md)**
+**Full HOWTO:** **[docs/HOWTO-MAC-TO-NAS.md](docs/HOWTO-MAC-TO-NAS.md)**
+
+**Always first on the Mac:** `cd` into the clone → `git pull origin main` → then commands.
 
 | | Path |
 |--|--|
+| Mac | `cd` your clone of this repo |
 | Sync **to** NAS | `/share/homes/kzielins/ops/usb-disk-imager` |
 | **cd** on NAS | `cd /share/homes/kzielins/ops/usb-disk-imager` |
 | Image out | `/share/homes/kzielins/images_vmware/<job>/` |
 
 ```bash
-# From Mac clone — rsync + start on NAS (pick approach)
+cd ~/src/usb-disk-imager
+git pull origin main
+
 ./bin/udi-rsync-run \
   --host kznas3-1 --user admin --device /dev/sdc \
   --out-dir /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125 \
@@ -24,19 +29,24 @@ Non-destructive CLI/TUI: compressed, SHA256-verified raw images of USB disks ove
 # other approaches: --approach nohup | screen-attach
 ```
 
-### Real percent (not “watch a log”)
-
-`percent = bytes_read_from_device / device_size * 100` (dd position, not `.zst` size).
+### Real percent
 
 ```bash
+cd ~/src/usb-disk-imager
+git pull origin main
+
 ./bin/udi-status --host kznas3-1 --user admin \
   --dir /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125 \
   --watch
 ```
 
+`percent = bytes_read_from_device / device_size * 100` (not `.zst` size).
+
 ## Quick Start (generic)
 
 ```bash
+cd ~/src/usb-disk-imager
+git pull origin main
 ./tests/run-tests.sh
 ./install.sh --prefix ~/.local
 ./bin/usb-disk-imager --host my-nas --user admin --device /dev/sdc --execute
