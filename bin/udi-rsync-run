@@ -65,8 +65,8 @@ Examples:
     --out-dir /share/homes/USER/images_vmware/job \
     --approach screen-attach --execute --yes
 
-After start, from another Mac terminal:
-  ./bin/udi-watch-progress --host my-nas --user admin --file /share/.../FILE.img.zst
+After start, from another Mac terminal (REAL % = read/total device bytes):
+  ./bin/udi-status --host my-nas --user admin --dir /share/.../job-folder --watch
 USAGE
 }
 
@@ -161,11 +161,10 @@ case "${APPROACH}" in
 
 Started detached screen '${SESSION_NAME}' on ${HOST}.
 Mac can sleep / disconnect.
-
-  Attach:    ssh -t ${SSH_USER}@${HOST} 'export TERM=vt100; screen -r ${SESSION_NAME}'
-  Progress:  ./bin/udi-watch-progress --host ${HOST} --user ${SSH_USER} --file ${OUT_DIR}/<name>.img.zst
-  One-shot:  ssh ${SSH_USER}@${HOST} 'cat ${PROGRESS_GLOB} 2>/dev/null; ls -lh ${OUT_DIR}/*.img.zst 2>/dev/null'
-  Log hint:  progress also prints inside the screen session every ~10s
+  NAS tool dir:  ${REMOTE_DIR}   (cd here on the NAS)
+  Attach:        ssh -t ${SSH_USER}@${HOST} 'export TERM=vt100; screen -r ${SESSION_NAME}'
+  REAL status:   ./bin/udi-status --host ${HOST} --user ${SSH_USER} --dir ${OUT_DIR} --watch
+  (percent = bytes read from device / device size — not .zst size)
 EOF
     ;;
   nohup)
@@ -175,10 +174,11 @@ EOF
     cat << EOF
 
 Started nohup on ${HOST}.
-  PID file:  ${PID_FILE}
-  Log:       ssh ${SSH_USER}@${HOST} 'tail -f ${LOG_FILE}'
-  Progress:  ./bin/udi-watch-progress --host ${HOST} --user ${SSH_USER} --file ${OUT_DIR}/<name>.img.zst
-  Alive?:    ssh ${SSH_USER}@${HOST} 'ps -p \$(cat ${PID_FILE}) -o pid,etime,cmd'
+  NAS tool dir:  ${REMOTE_DIR}
+  PID file:      ${PID_FILE}
+  Log:           ssh ${SSH_USER}@${HOST} 'tail -f ${LOG_FILE}'
+  REAL status:   ./bin/udi-status --host ${HOST} --user ${SSH_USER} --dir ${OUT_DIR} --watch
+  Alive?:        ssh ${SSH_USER}@${HOST} 'ps -p \$(cat ${PID_FILE}) -o pid,etime,cmd'
 EOF
     ;;
   screen-attach)
