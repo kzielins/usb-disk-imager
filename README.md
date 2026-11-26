@@ -1,6 +1,6 @@
 # usb-disk-imager
 
-**Author:** Krzysztof Zielinski ([github.com/kzielins](https://github.com/kzielins)) | **License:** MIT | **Version:** 2.2.5
+**Author:** Krzysztof Zielinski ([github.com/kzielins](https://github.com/kzielins)) | **License:** MIT | **Version:** 2.2.6
 
 Non-destructive CLI/TUI: compressed, SHA256-verified USB disk images over SSH or on the NAS.
 

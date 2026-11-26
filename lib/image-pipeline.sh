@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: MIT
 # Runs ON the machine that can read the block device (usually the NAS).
 # Env (required): DEV RPATH RSHA RPROG RBASE COMP TOTAL RDIR [DEVICE_LABEL]
-# Progress is REAL: percent = bytes_read_from_device / TOTAL * 100
-# (NOT compressed file size — zstd size is not linear with source).
+#
+# QNAP BusyBox often has NO mkfifo — do NOT use named pipes.
+# Pipeline: dd | tee >(sha256sum) | zstd/gzip   (bash process substitution)
+# Progress: percent = bytes read from device (/proc/<dd>/fdinfo) / TOTAL
 set -eu
 set -o pipefail 2>/dev/null || true
 
@@ -18,8 +20,13 @@ if ! [ -r "${DEV}" ]; then
   exit 1
 fi
 
+# Need bash process substitution (this file is always run with bash).
+if [ -z "${BASH_VERSION:-}" ]; then
+  echo "ERROR: image-pipeline.sh must run under bash (not sh/ash)." >&2
+  exit 1
+fi
+
 human_bytes() {
-  # awk portable GiB with 1 decimal
   awk -v b="$1" 'BEGIN { printf "%.1f" , b/1024/1024/1024 }'
 }
 
@@ -27,7 +34,6 @@ out_bytes() {
   if [ -f "${RPATH}" ]; then wc -c < "${RPATH}" 2>/dev/null | tr -d ' '; else echo 0; fi
 }
 
-# Write machine-parseable progress + one human line. percent = read/total.
 write_prog() {
   local pos="$1" pct="$2" stage="$3" eta="${4:-}" rate="${5:-}"
   local ob now human
@@ -69,9 +75,21 @@ status=running
 JOB
 }
 
+find_dd_pid() {
+  local p cmd
+  for p in /proc/[0-9]*; do
+    [ -r "${p}/cmdline" ] || continue
+    cmd=$(tr '\0' ' ' < "${p}/cmdline" 2>/dev/null || true)
+    case "${cmd}" in
+      dd\ if="${DEV}"*|dd\ if=${DEV}\ *) basename "${p}"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
 monitor_dd() {
   local pid="$1"
-  local pos=0 pct=0 prev_pos=0 prev_ts rate eta
+  local pos=0 pct=0 prev_pos=0 prev_ts rate eta now_ts dt
   prev_ts=$(date +%s)
   while kill -0 "${pid}" 2>/dev/null; do
     if [ -r "/proc/${pid}/fdinfo/0" ]; then
@@ -99,48 +117,48 @@ monitor_dd() {
   done
 }
 
-raw_fifo=$(mktemp -u /tmp/udi-raw.XXXXXX)
-sha_fifo=$(mktemp -u /tmp/udi-sha.XXXXXX)
-mkfifo "${raw_fifo}" "${sha_fifo}"
-cleanup() { rm -f "${raw_fifo}" "${sha_fifo}"; }
-trap cleanup EXIT
+# Background progress: discover dd PID after pipeline starts (no mkfifo needed).
+monitor_loop() {
+  local dd_pid="" i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    if dd_pid=$(find_dd_pid); then
+      monitor_dd "${dd_pid}"
+      return 0
+    fi
+    sleep 1
+  done
+  # Fallback: still emit heartbeats from compressed size (percent stays 0 until done)
+  while true; do
+    write_prog "0" "0" "imaging" "" "0"
+    sleep 5
+  done
+}
 
 write_job
 write_prog "0" "0" "start" "" "0"
+monitor_loop &
+mon_pid=$!
 
 rc=0
 if command -v zstd >/dev/null 2>&1 && [ "${COMP}" = "zstd" ]; then
-  (sha256sum < "${sha_fifo}" | awk -v f="${RBASE}" '{print $1 "  " f}' > "${RSHA}") &
-  sha_pid=$!
-  dd if="${DEV}" bs=4M of="${raw_fifo}" 2>/dev/null &
-  dd_pid=$!
-  monitor_dd "${dd_pid}" &
-  mon_pid=$!
-  tee "${sha_fifo}" < "${raw_fifo}" | zstd -T0 -3 -f -o "${RPATH}"
+  dd if="${DEV}" bs=4M 2>/dev/null \
+    | tee >(sha256sum | awk -v f="${RBASE}" '{print $1 "  " f}' > "${RSHA}") \
+    | zstd -T0 -3 -f -o "${RPATH}"
   rc=$?
-  wait "${dd_pid}" || rc=$?
-  kill "${mon_pid}" 2>/dev/null || true
-  wait "${mon_pid}" 2>/dev/null || true
-  wait "${sha_pid}" || rc=$?
 else
   RPATH="${RPATH%.zst}.gz"
   RSHA="${RPATH}.sha256"
   RPROG="${RPATH}.progress"
   RBASE="$(basename "${RPATH}")"
   write_job
-  (sha256sum < "${sha_fifo}" | awk -v f="${RBASE}" '{print $1 "  " f}' > "${RSHA}") &
-  sha_pid=$!
-  dd if="${DEV}" bs=4M of="${raw_fifo}" 2>/dev/null &
-  dd_pid=$!
-  monitor_dd "${dd_pid}" &
-  mon_pid=$!
-  tee "${sha_fifo}" < "${raw_fifo}" | gzip -6 > "${RPATH}"
+  dd if="${DEV}" bs=4M 2>/dev/null \
+    | tee >(sha256sum | awk -v f="${RBASE}" '{print $1 "  " f}' > "${RSHA}") \
+    | gzip -6 > "${RPATH}"
   rc=$?
-  wait "${dd_pid}" || rc=$?
-  kill "${mon_pid}" 2>/dev/null || true
-  wait "${mon_pid}" 2>/dev/null || true
-  wait "${sha_pid}" || rc=$?
 fi
+
+kill "${mon_pid}" 2>/dev/null || true
+wait "${mon_pid}" 2>/dev/null || true
 
 final_pos="${TOTAL}"
 [ "${TOTAL}" -gt 0 ] || final_pos="$(out_bytes)"
