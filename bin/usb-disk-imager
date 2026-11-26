@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Author: Krzysztof Zielinski <https://github.com/kzielins>
 set -euo pipefail
-VERSION="2.2.7"
+VERSION="2.2.8"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${PKG_DIR}/lib/discovery.sh"; load_saved_state
@@ -255,35 +255,41 @@ while IFS= read -r target_dev; do
   echo "  Imaging Mode:   ${MODE} (compressor=${COMPRESSOR}, os-only=${OS_ONLY})"
   echo "  Output File:    ${IMG_FILE}"
   echo "  Manifest File:  ${IMG_FILE}.manifest.md"
+  if [[ "${HOST}" != "local" && "${TARGET_SUBDIR}" == remote:* ]]; then
+    echo "  Background:     NAS screen udi-$(basename "${target_dev}") (Mac may disconnect after start)"
+  fi
   echo "------------------------------------"
+  # After summary: one clear ask to start background NAS write (or local write).
+  # Use /dev/tty so prompts work inside Mac screen / weird stdin.
   if [[ "${EXECUTE}" -eq 0 ]]; then
     CLI_CMD="./bin/usb-disk-imager --host ${HOST} --user ${SSH_USER} --device ${target_dev} --out-dir ${TARGET_SUBDIR} --mode ${MODE} --lang ${LANG_CODE} --execute"
     echo ""
-    printf "  [1;33mCommand to run directly without wizard:[0m
-"
-    echo "    ${CLI_CMD}"
+    echo "  CLI (optional): ${CLI_CMD}"
     echo "  Logs: ${LOG_FILE} | ${TRACE_FILE}"
     echo "------------------------------------"
-    log_info "[DRY-RUN] Verification complete. Zero bytes written."
-    if [[ -t 0 && "${YES_FLAG}" -eq 0 ]]; then
-      read -rp "Proceed to EXECUTE (write image + SHA256 + manifest) now? [yes/No] (default: No): " GO_EXEC </dev/tty
-      if [[ "${GO_EXEC}" =~ ^([yY][eE][sS]|[tT][aA][kK])$ ]]; then
-        EXECUTE=1
-        log_info "User confirmed transition from DRY-RUN to EXECUTE."
-      else
-        continue
-      fi
-    else
-      continue
-    fi
+    log_info "[DRY-RUN] Plan OK. Zero bytes written yet."
   fi
   if (( DEV_GB > DEST_FREE_GB )) && [[ "${YES_FLAG}" -eq 0 ]]; then
     log_err "Refusing write: Source (${DEV_GB} GB) exceeds destination free space (${DEST_FREE_GB} GB). Use --yes to override."
     continue
   fi
-  if [[ "${YES_FLAG}" -eq 0 && -t 0 ]]; then
-    read -rp "${MSG_CONFIRM_1}" C1 </dev/tty; [[ ! "${C1}" =~ ^([yY]|[yY][eE][sS]|[tT]|[tT][aA][kK])$ ]] && { log_info "${MSG_ABORT}"; continue; }
-    printf -v c2p "${MSG_CONFIRM_2}" "${IMG_FILE}"; read -rp "${c2p}" C2 </dev/tty; [[ "${C2}" != "YES" && "${C2}" != "TAK" ]] && { log_info "${MSG_ABORT}"; continue; }
+  if [[ "${YES_FLAG}" -eq 0 ]]; then
+    if [[ ! -r /dev/tty ]]; then
+      log_err "No /dev/tty — cannot ask for confirmation. Re-run in a real terminal or pass --yes --execute."
+      continue
+    fi
+    echo ""
+    printf "\033[1;31m%s\033[0m\n" "${MSG_DETACH_BANNER}"
+    echo "  ${MSG_DETACH_HINT}"
+    echo "  Source: ${target_dev}  →  ${IMG_FILE}"
+    echo ""
+    read -rp "${MSG_DETACH_ASK}" GO_EXEC </dev/tty || true
+    if [[ ! "${GO_EXEC}" =~ ^([yY][eE][sS]|[tT][aA][kK])$ ]]; then
+      log_info "${MSG_ABORT}"
+      continue
+    fi
+    EXECUTE=1
+    log_info "User typed TAK/YES — starting write (detached on NAS when out-dir is remote:)."
   fi
   log_info "${MSG_START_DUMP}"
   img_rc=0
