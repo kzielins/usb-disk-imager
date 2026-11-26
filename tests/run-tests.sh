@@ -4,10 +4,36 @@ export XDG_STATE_HOME="$(mktemp -d)" XDG_CONFIG_HOME="$(mktemp -d)"
 PKG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; BIN="${PKG_DIR}/bin/usb-disk-imager"
 log_info() { :; }; log_err() { :; }; run_target() { echo ""; }
 echo "[1/7] Version & help..."
-"${BIN}" --version | grep >/dev/null "2.2.4"
+"${BIN}" --version | grep >/dev/null "2.2.5"
 "${BIN}" --help | grep >/dev/null "usb-disk-imager"
-test -x "${PKG_DIR}/bin/udi-watch-progress"
-"${PKG_DIR}/bin/udi-watch-progress" --help | grep >/dev/null "udi-watch-progress"
+test -x "${PKG_DIR}/bin/udi-status"
+"${PKG_DIR}/bin/udi-status" --help | grep >/dev/null "read_bytes"
+test -x "${PKG_DIR}/bin/udi-rsync-run"
+"${PKG_DIR}/bin/udi-rsync-run" --help | grep >/dev/null "screen-detach"
+test -f "${PKG_DIR}/lib/image-pipeline.sh"
+test -f "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
+# udi-status: parse synthetic progress (real % formula)
+TMPJ=$(mktemp -d)
+cat > "${TMPJ}/demo.img.zst.progress" << 'P'
+# usb-disk-imager progress v1
+updated_utc=2026-01-01T00:00:00Z
+stage=imaging
+device=/dev/sdc
+image=/tmp/demo.img.zst
+read_bytes=128849018880
+total_bytes=512110190592
+percent=25
+out_bytes=40000000000
+rate_bytes_per_sec=52428800
+eta_seconds=7200
+started_utc=2026-01-01T00:00:00Z
+human=25%
+P
+echo "progress=${TMPJ}/demo.img.zst.progress" > "${TMPJ}/.udi-job"
+OUT=$("${PKG_DIR}/bin/udi-status" --host local --dir "${TMPJ}")
+echo "${OUT}" | grep >/dev/null "25%"
+echo "${OUT}" | grep >/dev/null "read_bytes / total_bytes"
+rm -rf "${TMPJ}"
 echo "[2/7] Non-interactive dry-run (EN & PL)..."
 "${BIN}" --dry-run </dev/null | grep >/dev/null "INDEPENDENT DRY-RUN"
 "${BIN}" --lang pl --dry-run </dev/null | grep >/dev/null "INDEPENDENT DRY-RUN"

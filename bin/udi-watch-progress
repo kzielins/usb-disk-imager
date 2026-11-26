@@ -1,56 +1,26 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
-# Author: Krzysztof Zielinski <https://github.com/kzielins>
-# Poll .progress next to a remote/local image without attaching to screen/tmux.
+# Compatibility wrapper → bin/udi-status --watch
+# Prefer: ./bin/udi-status --host … --dir … --watch
 set -euo pipefail
-HOST="" USER_NAME="" FILE="" INTERVAL=10
-usage() {
-  cat << 'USAGE'
-Usage: udi-watch-progress --host <host|local> [--user <ssh-user>] --file <image-path> [--interval 10]
-
-  --file   Path to .img.zst / .img.gz (with or without remote: prefix),
-           or the sibling .progress file itself.
-
-Examples:
-  ./bin/udi-watch-progress --host my-nas --user admin \
-    --file /share/homes/USER/images_vmware/job/disk.img.zst
-
-  ./bin/udi-watch-progress --host local \
-    --file /share/homes/USER/images_vmware/job/disk.img.zst
-USAGE
-}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HOST="" USER_NAME="" FILE="" DIR="" INTERVAL=5
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -H|--host) HOST="$2"; shift 2 ;;
     -u|--user) USER_NAME="$2"; shift 2 ;;
     -f|--file) FILE="$2"; shift 2 ;;
+    --dir) DIR="$2"; shift 2 ;;
     -i|--interval) INTERVAL="$2"; shift 2 ;;
-    -h|--help) usage; exit 0 ;;
-    *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
+    -h|--help)
+      echo "Deprecated alias. Use: ./bin/udi-status --host … --dir … --watch"
+      exec "${SCRIPT_DIR}/udi-status" --help
+      ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
-[[ -z "${HOST}" || -z "${FILE}" ]] && { usage; exit 1; }
-FILE="${FILE#remote:}"
-FILE="${FILE#local:}"
-case "${FILE}" in
-  *.progress) PROG="${FILE}" ;;
-  *) PROG="${FILE}.progress" ;;
-esac
-read_once() {
-  if [[ "${HOST}" == "local" ]]; then
-    if [[ -f "${PROG}" ]]; then cat "${PROG}"; else echo "(no progress file yet: ${PROG})"; fi
-    if [[ -f "${FILE}" ]]; then echo "out_size_bytes=$(wc -c < "${FILE}" | tr -d ' ')"; fi
-  else
-    local ssh_user="${USER_NAME:-admin}"
-    ssh -o BatchMode=yes -o ConnectTimeout=10 \
-      -o ServerAliveInterval=30 -o ServerAliveCountMax=12 \
-      "${ssh_user}@${HOST}" \
-      "if [ -f '${PROG}' ]; then cat '${PROG}'; else echo '(no progress file yet: ${PROG})'; fi; if [ -f '${FILE}' ]; then echo out_size_bytes=\$(wc -c < '${FILE}' | tr -d ' '); fi"
-  fi
-}
-echo "Watching ${PROG} on ${HOST} every ${INTERVAL}s (Ctrl-C to stop)"
-while true; do
-  printf "---- %s ----\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  read_once || echo "(ssh/read failed)"
-  sleep "${INTERVAL}"
-done
+args=(--host "${HOST}" --watch --interval "${INTERVAL}")
+[[ -n "${USER_NAME}" ]] && args+=(--user "${USER_NAME}")
+[[ -n "${DIR}" ]] && args+=(--dir "${DIR}")
+[[ -n "${FILE}" ]] && args+=(--file "${FILE}")
+exec "${SCRIPT_DIR}/udi-status" "${args[@]}"

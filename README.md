@@ -1,45 +1,49 @@
 # usb-disk-imager
 
-**Author:** Krzysztof Zielinski ([github.com/kzielins](https://github.com/kzielins)) | **License:** MIT | **Version:** 2.2.4
+**Author:** Krzysztof Zielinski ([github.com/kzielins](https://github.com/kzielins)) | **License:** MIT | **Version:** 2.2.5
 
-Vendor-agnostic, non-destructive CLI/TUI utility for creating compressed, SHA256-verified backups of external USB block devices over SSH (from macOS/Linux operator workstations to QNAP QTS, Synology DSM, TrueNAS, Proxmox, or Linux servers) or locally.
+Non-destructive CLI/TUI: compressed, SHA256-verified raw images of USB disks over SSH or on the NAS itself.
 
-## Where to Install
-- **Operator Workstation (macOS / Linux):** `./install.sh --prefix ~/.local` — runs remotely over SSH, scans hosts, detects external USB drives, offers safe USB unmount, compares source vs destination size, and streams verified backups.
-- **Directly on NAS / Linux (Cron / Hotplug / long jobs):** Run with `--host local … --execute` inside `screen` / `tmux` / `nohup`. See **[docs/LONG-RUN-NAS.md](docs/LONG-RUN-NAS.md)**.
+## Operator path (Mac → NAS)
 
-## Quick Start
+**Full copy-paste:** **[docs/HOWTO-MAC-TO-NAS.md](docs/HOWTO-MAC-TO-NAS.md)**
+
+| | Path |
+|--|--|
+| Sync **to** NAS | `/share/homes/kzielins/ops/usb-disk-imager` |
+| **cd** on NAS | `cd /share/homes/kzielins/ops/usb-disk-imager` |
+| Image out | `/share/homes/kzielins/images_vmware/<job>/` |
+
+```bash
+# From Mac clone — rsync + start on NAS (pick approach)
+./bin/udi-rsync-run \
+  --host kznas3-1 --user admin --device /dev/sdc \
+  --out-dir /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125 \
+  --remote-dir /share/homes/kzielins/ops/usb-disk-imager \
+  --approach screen-detach --lang pl --execute --yes
+# other approaches: --approach nohup | screen-attach
+```
+
+### Real percent (not “watch a log”)
+
+`percent = bytes_read_from_device / device_size * 100` (dd position, not `.zst` size).
+
+```bash
+./bin/udi-status --host kznas3-1 --user admin \
+  --dir /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125 \
+  --watch
+```
+
+## Quick Start (generic)
+
 ```bash
 ./tests/run-tests.sh
-./bin/usb-disk-imager
-./bin/usb-disk-imager --host my-nas --user admin --device /dev/sdc --auto-unmount --execute
+./install.sh --prefix ~/.local
+./bin/usb-disk-imager --host my-nas --user admin --device /dev/sdc --execute
 ```
-
-## Long dumps (hours) — use NAS session + % progress
-
-Laptop SSH alone often dies (`Broken pipe` / timeout). On QNAP:
-
-```bash
-ssh admin@my-nas
-export TERM=vt100          # fixes: screen: $TERM too long - sorry.
-cd /path/to/usb-disk-imager
-screen -S udi-sdc
-./bin/usb-disk-imager --host local --device /dev/sdc \
-  --out-dir local:/share/homes/USER/images_vmware/job \
-  --mode raw --yes --execute
-# Ctrl-A D  → detach;  TERM=vt100 screen -r udi-sdc  → reattach
-```
-
-Progress without attach (sibling `*.progress` file, percent = bytes read from disk):
-
-```bash
-./bin/udi-watch-progress --host my-nas --user admin \
-  --file /share/homes/USER/images_vmware/job/NAME.img.zst
-```
-
-Full how-to (screen / tmux / nohup / monitor): **[docs/LONG-RUN-NAS.md](docs/LONG-RUN-NAS.md)**.
 
 ## Notes
-- Raw device read usually needs **`admin`/`root`** — unprivileged users get `Permission denied` on `/dev/sdX`.
-- Default mode is dry-run; `--execute` writes image + SHA256 + provenance manifest.
-- Slimming / OS vs user-data post-process: [docs/IMAGE-SLIMMING.md](docs/IMAGE-SLIMMING.md).
+- Use **`admin`/`root`** to read `/dev/sdX`.
+- Default is dry-run; `--execute` writes image + SHA256 + manifest.
+- Long jobs: [docs/HOWTO-MAC-TO-NAS.md](docs/HOWTO-MAC-TO-NAS.md), [docs/LONG-RUN-NAS.md](docs/LONG-RUN-NAS.md)
+- Slimming: [docs/IMAGE-SLIMMING.md](docs/IMAGE-SLIMMING.md)

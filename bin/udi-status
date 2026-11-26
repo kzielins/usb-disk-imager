@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Author: Krzysztof Zielinski <https://github.com/kzielins>
+# Show REAL imaging progress: done bytes / planned device bytes → percent + ETA.
+# Reads key=value from *.progress (written by lib/image-pipeline.sh).
+set -euo pipefail
+
+HOST="" USER_NAME="admin" DIR="" FILE="" INTERVAL=5 WATCH=0 ONCE=1
+
+usage() {
+  cat << 'USAGE'
+Usage:
+  udi-status --host <nas|local> [--user admin] --dir <job-folder-on-nas>
+  udi-status --host <nas|local> [--user admin] --file <path.img.zst|.progress>
+  udi-status ... --watch [--interval 5]
+
+Shows:
+  planned total (device size) | bytes read so far | REAL percent | ETA | compressed out size
+
+Percent formula (same as the imager):
+  percent = read_bytes / total_bytes * 100
+  where read_bytes = dd position on the block device (/proc/.../fdinfo)
+  (compressed .img.zst size is NOT the percent — it is shown separately)
+
+Examples:
+  # Auto-pick latest job in the output folder (recommended)
+  ./bin/udi-status --host my-nas --user admin \
+    --dir /share/homes/USER/images_vmware/job --watch
+
+  # Point at one image / .progress file
+  ./bin/udi-status --host my-nas --user admin \
+    --file /share/homes/USER/images_vmware/job/NAME.img.zst
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -H|--host) HOST="$2"; shift 2 ;;
+    -u|--user) USER_NAME="$2"; shift 2 ;;
+    --dir) DIR="$2"; shift 2 ;;
+    -f|--file) FILE="$2"; shift 2 ;;
+    -i|--interval) INTERVAL="$2"; shift 2 ;;
+    --watch) WATCH=1; ONCE=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
+  esac
+done
+
+[[ -z "${HOST}" ]] && { usage; exit 1; }
+[[ -z "${DIR}" && -z "${FILE}" ]] && { usage; exit 1; }
+DIR="${DIR#remote:}"; DIR="${DIR#local:}"
+FILE="${FILE#remote:}"; FILE="${FILE#local:}"
+
+remote_sh() {
+  local script="$1"
+  if [[ "${HOST}" == "local" ]]; then
+    bash -c "${script}"
+  else
+    ssh -o BatchMode=yes -o ConnectTimeout=10 \
+      -o ServerAliveInterval=30 -o ServerAliveCountMax=12 \
+      "${USER_NAME}@${HOST}" "bash -c $(printf '%q' "${script}")"
+  fi
+}
+
+# Resolve progress path on the target (prints one path).
+resolve_progress_script() {
+  cat << 'EOS'
+set -e
+DIR_IN="$1"
+FILE_IN="$2"
+if [ -n "$FILE_IN" ]; then
+  case "$FILE_IN" in
+    *.progress) echo "$FILE_IN"; exit 0 ;;
+    *)
+      if [ -f "${FILE_IN}.progress" ]; then echo "${FILE_IN}.progress"; exit 0; fi
+      echo "$FILE_IN"
+      exit 0
+      ;;
+  esac
+fi
+JOB="${DIR_IN}/.udi-job"
+if [ -f "$JOB" ]; then
+  prog=$(awk -F= '/^progress=/{print $2; exit}' "$JOB")
+  if [ -n "$prog" ] && [ -f "$prog" ]; then echo "$prog"; exit 0; fi
+  img=$(awk -F= '/^image=/{print $2; exit}' "$JOB")
+  if [ -n "$img" ] && [ -f "${img}.progress" ]; then echo "${img}.progress"; exit 0; fi
+fi
+# newest *.progress under dir
+newest=$(ls -1t "$DIR_IN"/*.progress 2>/dev/null | head -n1 || true)
+if [ -n "$newest" ]; then echo "$newest"; exit 0; fi
+echo ""
+EOS
+}
+
+fetch_progress_body() {
+  local prog_path="$1"
+  remote_sh "if [ -f $(printf '%q' "${prog_path}") ]; then cat $(printf '%q' "${prog_path}"); else echo 'MISSING'; fi"
+}
+
+human_gib() {
+  awk -v b="${1:-0}" 'BEGIN { if (b+0<1) printf "0.0"; else printf "%.1f", b/1024/1024/1024 }'
+}
+
+fmt_eta() {
+  local s="${1:-}"
+  if [[ -z "${s}" || "${s}" == "null" || ! "${s}" =~ ^[0-9]+$ ]]; then
+    echo "—"
+    return
+  fi
+  local h=$((s / 3600)) m=$(( (s % 3600) / 60 )) sec=$((s % 60))
+  if (( h > 0 )); then printf "%dh%02dm" "$h" "$m"
+  elif (( m > 0 )); then printf "%dm%02ds" "$m" "$sec"
+  else printf "%ds" "$sec"; fi
+}
+
+bar() {
+  local pct="${1:-0}" width=30
+  (( pct < 0 )) && pct=0
+  (( pct > 100 )) && pct=100
+  local filled=$(( pct * width / 100 ))
+  local i=0 out="["
+  while (( i < filled )); do out+="#"; i=$((i+1)); done
+  while (( i < width )); do out+="-"; i=$((i+1)); done
+  out+="]"
+  printf "%s" "$out"
+}
+
+kv() {
+  # stdin: progress file → print value for key $1
+  local key="$1"
+  awk -F= -v k="$key" '$1==k { sub(/^[^=]*=/,""); print; exit }'
+}
+
+render() {
+  local body="$1" prog_path="$2"
+  if [[ "${body}" == "MISSING" || -z "${body}" ]]; then
+    echo "No progress file yet at: ${prog_path}"
+    echo "Job may not have started, or wrong --dir/--file."
+    return 1
+  fi
+  # Legacy one-line format fallback (pre-v1 key=value)
+  if ! echo "${body}" | grep -q '^percent='; then
+    echo "(legacy progress line)"
+    echo "${body}"
+    return 0
+  fi
+  local pct total read out stage device image eta rate updated human status_note
+  pct=$(echo "${body}" | kv percent)
+  total=$(echo "${body}" | kv total_bytes)
+  read=$(echo "${body}" | kv read_bytes)
+  out=$(echo "${body}" | kv out_bytes)
+  stage=$(echo "${body}" | kv stage)
+  device=$(echo "${body}" | kv device)
+  image=$(echo "${body}" | kv image)
+  eta=$(echo "${body}" | kv eta_seconds)
+  rate=$(echo "${body}" | kv rate_bytes_per_sec)
+  updated=$(echo "${body}" | kv updated_utc)
+  human=$(echo "${body}" | kv human)
+
+  # Recompute percent locally to prove the formula (ignore stale/bad values)
+  local calc_pct=0
+  if [[ "${total}" =~ ^[0-9]+$ && "${read}" =~ ^[0-9]+$ && "${total}" -gt 0 ]]; then
+    calc_pct=$(( read * 100 / total ))
+    (( calc_pct > 100 )) && calc_pct=100
+  fi
+  pct="${calc_pct}"
+
+  local rate_mibs="—"
+  if [[ "${rate}" =~ ^[0-9]+$ && "${rate}" -gt 0 ]]; then
+    rate_mibs=$(awk -v r="$rate" 'BEGIN { printf "%.1f" , r/1024/1024 }')
+    rate_mibs="${rate_mibs} MiB/s"
+  fi
+
+  echo "========== usb-disk-imager STATUS =========="
+  echo "Updated:   ${updated:-?}"
+  echo "Stage:     ${stage:-?}"
+  echo "Device:    ${device:-?}"
+  echo "Image:     ${image:-?}"
+  echo "Progress:  $(bar "${pct}")  ${pct}%"
+  echo "Read:      $(human_gib "${read}") / $(human_gib "${total}") GiB   (${read:-0} / ${total:-0} bytes)"
+  echo "Planned:   $(human_gib "${total}") GiB  ← full block device size"
+  echo "Done:      $(human_gib "${read}") GiB  ← bytes read from device so far"
+  echo "Out file:  $(human_gib "${out}") GiB compressed (NOT used for %)"
+  echo "Speed:     ${rate_mibs}"
+  echo "ETA:       $(fmt_eta "${eta}")"
+  echo "Formula:   percent = read_bytes / total_bytes * 100"
+  [[ -n "${human}" ]] && echo "Summary:   ${human}"
+  echo "============================================"
+}
+
+resolve_path() {
+  local resolver prog
+  resolver=$(resolve_progress_script)
+  if [[ "${HOST}" == "local" ]]; then
+    prog=$(DIR_IN="${DIR}" FILE_IN="${FILE}" bash -c "${resolver}" bash "${DIR}" "${FILE}")
+  else
+    prog=$(ssh -o BatchMode=yes -o ConnectTimeout=10 \
+      "${USER_NAME}@${HOST}" \
+      "bash -s -- $(printf '%q' "${DIR}") $(printf '%q' "${FILE}")" <<< "${resolver}")
+  fi
+  printf "%s" "${prog}"
+}
+
+main_once() {
+  local prog body
+  prog=$(resolve_path)
+  if [[ -z "${prog}" ]]; then
+    echo "No .progress / .udi-job found under --dir ${DIR:-?} / --file ${FILE:-?}"
+    return 1
+  fi
+  body=$(fetch_progress_body "${prog}") || body="MISSING"
+  render "${body}" "${prog}"
+}
+
+if [[ "${WATCH}" -eq 1 ]]; then
+  echo "Polling every ${INTERVAL}s (Ctrl-C to stop). Host=${HOST}"
+  while true; do
+    printf "\n---- %s ----\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    main_once || true
+    sleep "${INTERVAL}"
+  done
+else
+  main_once
+fi
