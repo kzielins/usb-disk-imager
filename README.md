@@ -15,29 +15,32 @@ Vendor-agnostic, non-destructive CLI/TUI utility for creating compressed, SHA256
 ./bin/usb-disk-imager --host my-nas --user admin --device /dev/sdc --auto-unmount --execute
 ```
 
-## Long dumps (hours) — use NAS session + % progress
+## Long dumps (hours) — from the Mac via rsync
 
-Laptop SSH alone often dies (`Broken pipe` / timeout). On QNAP:
+Stay on the Mac. Helper **rsyncs** this repo to the NAS and starts the job there (3 approaches):
 
 ```bash
-ssh admin@my-nas
-export TERM=vt100          # fixes: screen: $TERM too long - sorry.
-cd /path/to/usb-disk-imager
-screen -S udi-sdc
-./bin/usb-disk-imager --host local --device /dev/sdc \
-  --out-dir local:/share/homes/USER/images_vmware/job \
-  --mode raw --yes --execute
-# Ctrl-A D  → detach;  TERM=vt100 screen -r udi-sdc  → reattach
+# 1) recommended: detached screen on NAS
+./bin/udi-rsync-run --host my-nas --user admin --device /dev/sdc \
+  --out-dir /share/homes/USER/images_vmware/job \
+  --remote-dir /share/homes/USER/ops/usb-disk-imager \
+  --approach screen-detach --execute --yes
+
+# 2) nohup fallback
+./bin/udi-rsync-run ... --approach nohup --execute --yes
+
+# 3) interactive screen (Ctrl-A D to detach)
+./bin/udi-rsync-run ... --approach screen-attach --execute --yes
 ```
 
-Progress without attach (sibling `*.progress` file, percent = bytes read from disk):
+Progress without attach:
 
 ```bash
 ./bin/udi-watch-progress --host my-nas --user admin \
   --file /share/homes/USER/images_vmware/job/NAME.img.zst
 ```
 
-Full how-to (screen / tmux / nohup / monitor): **[docs/LONG-RUN-NAS.md](docs/LONG-RUN-NAS.md)**.
+Full copy-paste (incl. kznas3-1 `/dev/sdc`): **[docs/LONG-RUN-NAS.md](docs/LONG-RUN-NAS.md)**.
 
 ## Notes
 - Raw device read usually needs **`admin`/`root`** — unprivileged users get `Permission denied` on `/dev/sdX`.

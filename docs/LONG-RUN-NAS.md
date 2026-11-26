@@ -1,186 +1,125 @@
-# Long-running USB image dumps on NAS (screen / tmux / nohup + % progress)
+# Long-running USB image dumps — from your Mac via rsync
 
 **Repo:** [github.com/kzielins/usb-disk-imager](https://github.com/kzielins/usb-disk-imager) (not the infra meta-repo).
 
-Imaging a ~500 GB disk with zstd + SHA256 can take hours. Do **not** rely on a laptop SSH session alone: sleep, Tailscale flaps, or a quiet SSH channel cause `Broken pipe` / `Operation timed out`. Prefer a **detachable session on the NAS** (`--host local`) as a privileged user (`admin` / `root`). User `kzielins` usually gets `dd: can't open '/dev/sdc': Permission denied`.
+You work on the **Mac**. The script **rsyncs** this repo to the NAS, then starts the dump **on the NAS** so laptop sleep / Tailscale flaps do not kill a multi-hour job.
 
-## 0) One-time: put the tool on the NAS
+Privileged SSH user (`admin` / `root`) is required to read `/dev/sdc`. Plain `kzielins` → `Permission denied`.
 
-From your Mac (with the repo checked out):
-
-```bash
-rsync -avz --delete ./ admin@kznas3-1:/share/homes/kzielins/ops/usb-disk-imager/
-```
-
-Or on the NAS (if `git` / Entware exists):
+## From the Mac: one command (3 approaches)
 
 ```bash
-cd /share/homes/kzielins/ops
-git clone https://github.com/kzielins/usb-disk-imager.git
+cd /path/to/usb-disk-imager   # this checkout on the Mac
 ```
 
-## 1) What “screen-like” tools exist on QNAP QTS
+### Approach 1 — `screen-detach` (recommended)
 
-| Tool | Typical on QTS | Notes |
-|------|----------------|-------|
-| `screen` | Often yes | Old binary: `$TERM too long - sorry.` → fix TERM (below) |
-| `tmux` | Often **no** unless Entware | Try `/opt/bin/tmux` |
-| `nohup` + `&` | Always | Best fallback; log + pid file; no attach UI |
-| `setsid` | Sometimes | Same idea as nohup |
-
-Check on the NAS:
+rsync → start **detached** `screen` on NAS → close the lid.
 
 ```bash
-command -v screen; command -v tmux; command -v nohup; ls /opt/bin/tmux 2>/dev/null
+./bin/udi-rsync-run \
+  --host kznas3-1 --user admin --device /dev/sdc \
+  --out-dir /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125 \
+  --remote-dir /share/homes/kzielins/ops/usb-disk-imager \
+  --approach screen-detach --lang pl --execute --yes
 ```
 
-### Fix for `$TERM too long - sorry.`
+- Reattach later:  
+  `ssh -t admin@kznas3-1 'export TERM=vt100; screen -r udi-dump'`
+- Detach again: `Ctrl-A` then `D`
 
-macOS / modern terminals send a long `TERM` (e.g. `xterm-256color` variants). QNAP `screen` rejects it.
+### Approach 2 — `nohup` (if `screen` missing / TERM broken)
 
 ```bash
-export TERM=vt100
-# or for one shot:
-TERM=vt100 screen -S udi-sdc
+./bin/udi-rsync-run \
+  --host kznas3-1 --user admin --device /dev/sdc \
+  --out-dir /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125 \
+  --remote-dir /share/homes/kzielins/ops/usb-disk-imager \
+  --approach nohup --lang pl --execute --yes
 ```
 
-## 2) Recommended: run **on the NAS** inside screen
+- Log: `ssh admin@kznas3-1 'tail -f /share/homes/kzielins/images_vmware/.../udi-run.log'`
 
-SSH in (Tailscale MagicDNS name, e.g. `kznas3-1`, or LAN alias from `/etc/hosts`):
+### Approach 3 — `screen-attach` (watch once, then detach)
+
+rsync → interactive SSH into `screen` (you see output; `Ctrl-A D` leaves it running).
 
 ```bash
-ssh admin@kznas3-1
-export TERM=vt100
-cd /share/homes/kzielins/ops/usb-disk-imager
-screen -S udi-sdc
+./bin/udi-rsync-run \
+  --host kznas3-1 --user admin --device /dev/sdc \
+  --out-dir /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125 \
+  --remote-dir /share/homes/kzielins/ops/usb-disk-imager \
+  --approach screen-attach --lang pl --execute --yes
 ```
 
-Inside screen (dry-run first, then execute):
+### Dry-run first (no write, no start — only rsync `-n`)
 
 ```bash
-./bin/usb-disk-imager --host local --device /dev/sdc \
-  --out-dir local:/share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125 \
-  --mode raw --lang pl --yes --execute
+./bin/udi-rsync-run ... --dry-sync
+# then without --execute for imager dry-run after a real sync:
+./bin/udi-rsync-run ... --approach screen-detach   # omit --execute
 ```
 
-| Key | Action |
-|-----|--------|
-| `Ctrl-A` then `D` | Detach (job keeps running) |
-| `TERM=vt100 screen -ls` | List sessions |
-| `TERM=vt100 screen -r udi-sdc` | Reattach |
-| `TERM=vt100 screen -d -r udi-sdc` | Take over attached session |
+## Progress % without attaching
 
-Leave the Mac. Imaging continues on the NAS.
+Sibling file: `<image>.img.zst.progress` — `read=… (N%)` is bytes read from the disk.
 
-## 3) Fallback: `nohup` (no screen attach)
-
-On the NAS as `admin`:
-
-```bash
-cd /share/homes/kzielins/ops/usb-disk-imager
-OUT=/share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125
-mkdir -p "$OUT"
-nohup ./bin/usb-disk-imager --host local --device /dev/sdc \
-  --out-dir "local:${OUT}" --mode raw --lang pl --yes --execute \
-  > "${OUT}/udi-run.log" 2>&1 &
-echo $! > "${OUT}/udi-run.pid"
-```
-
-Later:
-
-```bash
-tail -n 50 "${OUT}/udi-run.log"
-ps -p "$(cat "${OUT}/udi-run.pid")" -o pid,etime,cmd
-```
-
-## 4) Monitor **percent progress** without attaching
-
-From v2.2.4 the remote/local NAS pipeline writes a sibling file:
-
-`<image>.img.zst.progress`
-
-Example line:
-
-```text
-2026-11-26T12:00:00Z | stage=imaging | read=123456789012/512110190592 (24%) | out_bytes=45678901234
-```
-
-`read=… (N%)` is bytes read from the block device (true progress). `out_bytes` is compressed size (not %).
-
-### From the Mac (no screen attach)
+From the Mac (second terminal):
 
 ```bash
 ./bin/udi-watch-progress --host kznas3-1 --user admin \
-  --file /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125/SOME.img.zst
+  --file /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125/NAME.img.zst
 ```
 
 One-shot:
 
 ```bash
-ssh admin@kznas3-1 'cat /share/homes/kzielins/images_vmware/.../*.progress'
-ssh admin@kznas3-1 'ls -lh /share/homes/kzielins/images_vmware/.../*.img.zst'
+ssh admin@kznas3-1 'cat /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125/*.progress'
+ssh admin@kznas3-1 'ls -lh /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125/*.img.zst'
 ```
 
-BusyBox loop if `watch` is missing:
+## What the helper does
+
+1. `ssh` check (`BatchMode`)
+2. `rsync -avz --delete` of this checkout → `--remote-dir` on the NAS (excludes `.git`, images)
+3. On the NAS runs:  
+   `./bin/usb-disk-imager --host local --device … --out-dir local:…`  
+   inside **screen** or **nohup**
+
+## QNAP `screen` + `$TERM too long`
+
+Old QTS `screen` rejects long macOS `TERM`. The helper always uses `TERM=vt100`. Manual fix:
 
 ```bash
-ssh admin@kznas3-1 'while sleep 10; do date -u; cat /path/to/file.img.zst.progress 2>/dev/null; ls -lh /path/to/file.img.zst 2>/dev/null; echo; done'
+export TERM=vt100
+# or: TERM=vt100 screen -S udi-dump
 ```
 
-### If you reattach to screen
+| Tool on QTS | Typical | Role |
+|-------------|---------|------|
+| `screen` | Often yes | Approaches 1 & 3 |
+| `tmux` | Often only via Entware `/opt/bin/tmux` | optional |
+| `nohup` | Always | Approach 2 |
 
-You also see the same progress lines on stderr every ~10s (they keep SSH alive when you *do* run over SSH).
+## Why earlier Mac-only SSH runs failed
 
-## 5) If you insist on driving from the Mac over SSH
+| Attempt | Result |
+|---------|--------|
+| `--user kzielins` | `Permission denied` on `/dev/sdc` |
+| `--user admin` from Mac without screen/nohup | `Broken pipe` / timeout mid-dump |
+| `screen` on NAS with default TERM | `$TERM too long - sorry.` |
+| Host aliases | LAN: `kznas3` / `nas3`; Tailscale: `kznas3-1` |
 
-1. Use **`admin`** (not `kzielins`) so `/dev/sdc` is readable.
-2. Run the **client** inside local `screen`/`tmux` on the Mac so a closed Terminal tab does not kill it.
-3. Prefer writing **`remote:/share/...`** so compression stays on the NAS (less Tailscale traffic).
-4. Still prefer NAS-local `--host local` for multi-hour jobs.
-
-```bash
-# on Mac
-screen -S udi-mac
-./bin/usb-disk-imager --host kznas3-1 --user admin --device /dev/sdc \
-  --out-dir remote:/share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125 \
-  --mode raw --lang pl --yes --execute
-# Ctrl-A D to detach
-```
-
-Second terminal — progress only:
+## Manual fallback (no helper)
 
 ```bash
-./bin/udi-watch-progress --host kznas3-1 --user admin \
-  --file /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125/<name>.img.zst
-```
-
-## 6) Copy-paste checklist for your current dump (`/dev/sdc` @ kznas3-1)
-
-```bash
-# Mac → NAS
+rsync -avz --delete ./ admin@kznas3-1:/share/homes/kzielins/ops/usb-disk-imager/
 ssh admin@kznas3-1
 export TERM=vt100
-cd /share/homes/kzielins/ops/usb-disk-imager   # or wherever you synced the repo
-screen -S udi-sdc
+cd /share/homes/kzielins/ops/usb-disk-imager
+screen -S udi-dump
 ./bin/usb-disk-imager --host local --device /dev/sdc \
   --out-dir local:/share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125 \
   --mode raw --lang pl --yes --execute
 # Ctrl-A D
 ```
-
-Monitor from Mac:
-
-```bash
-./bin/udi-watch-progress --host kznas3-1 --user admin \
-  --file /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125/
-# after the job starts, pass the concrete .img.zst path shown in the summary
-```
-
-## 7) Why your earlier runs failed (from the logs)
-
-| Attempt | What happened |
-|---------|----------------|
-| `--user kzielins` | `Permission denied` on `/dev/sdc`; tool still printed SUKCES (fixed in 2.2.4 — pipefail + tiny-output check + non-zero abort) |
-| `--user admin` from Mac | Long SSH went quiet → `Broken pipe` / `Operation timed out` |
-| `screen` on NAS | `$TERM too long` → use `TERM=vt100` |
-| `ssh kznas3` / hosts file | LAN aliases are `kznas3` / `nas3`; Tailscale name is `kznas3-1` (MagicDNS) |

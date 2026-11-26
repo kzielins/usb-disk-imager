@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Author: Krzysztof Zielinski <https://github.com/kzielins>
+# From operator Mac/Linux: rsync this repo to the NAS, then start a long imaging
+# job on the NAS (3 approaches). You stay on the Mac; the heavy work runs there.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PKG_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+HOST=""
+SSH_USER="admin"
+REMOTE_DIR="/share/homes/USER/ops/usb-disk-imager"
+DEVICE=""
+OUT_DIR=""
+APPROACH="screen-detach"
+LANG_CODE="pl"
+EXECUTE=0
+YES_FLAG=0
+SESSION_NAME="udi-dump"
+DRY_SYNC=0
+
+usage() {
+  cat << 'USAGE'
+Usage: udi-rsync-run --host <nas> --user admin --device /dev/sdX \
+         --out-dir /share/.../job-folder [OPTIONS]
+
+From your Mac: rsync this checkout to the NAS, then start imaging ON the NAS
+(--host local there) so laptop sleep / Tailscale flaps do not kill the dump.
+
+Required:
+  -H, --host <host>         NAS hostname (Tailscale MagicDNS or LAN)
+  -u, --user <user>         SSH user with block-device read (usually admin)
+  -d, --device <dev>        e.g. /dev/sdc
+  -o, --out-dir <path>      Absolute path ON THE NAS (no local:/ remote: prefix)
+
+Approaches (pick one):
+  --approach screen-detach  (default) rsync + start detached screen on NAS
+  --approach nohup          rsync + nohup in background on NAS (always works)
+  --approach screen-attach  rsync + interactive SSH into screen (you watch once)
+
+Other:
+  --remote-dir <path>       Where to sync the tool on NAS
+                            (default: /share/homes/USER/ops/usb-disk-imager)
+  --session <name>          screen session name (default: udi-dump)
+  -l, --lang <en|pl>        Language for usb-disk-imager (default: pl)
+      --execute             Actually write the image (default: dry-run only)
+      --yes                 Pass --yes to skip imager prompts
+      --dry-sync            Show rsync -n, do not copy / start job
+  -h, --help                This help
+
+Examples:
+  # 1) Sync + detached screen (recommended) — then close the Mac lid
+  ./bin/udi-rsync-run --host my-nas --user admin --device /dev/sdc \
+    --out-dir /share/homes/USER/images_vmware/job \
+    --remote-dir /share/homes/USER/ops/usb-disk-imager \
+    --approach screen-detach --execute --yes
+
+  # 2) Sync + nohup (if screen is missing / TERM broken)
+  ./bin/udi-rsync-run --host my-nas --user admin --device /dev/sdc \
+    --out-dir /share/homes/USER/images_vmware/job \
+    --approach nohup --execute --yes
+
+  # 3) Sync + attach to screen now (Ctrl-A D to detach later)
+  ./bin/udi-rsync-run --host my-nas --user admin --device /dev/sdc \
+    --out-dir /share/homes/USER/images_vmware/job \
+    --approach screen-attach --execute --yes
+
+After start, from another Mac terminal:
+  ./bin/udi-watch-progress --host my-nas --user admin --file /share/.../FILE.img.zst
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -H|--host) HOST="$2"; shift 2 ;;
+    -u|--user) SSH_USER="$2"; shift 2 ;;
+    -d|--device) DEVICE="$2"; shift 2 ;;
+    -o|--out-dir) OUT_DIR="$2"; shift 2 ;;
+    --remote-dir) REMOTE_DIR="$2"; shift 2 ;;
+    --approach) APPROACH="$2"; shift 2 ;;
+    --session) SESSION_NAME="$2"; shift 2 ;;
+    -l|--lang) LANG_CODE="$2"; shift 2 ;;
+    --execute) EXECUTE=1; shift ;;
+    --yes) YES_FLAG=1; shift ;;
+    --dry-sync) DRY_SYNC=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
+  esac
+done
+
+[[ -z "${HOST}" || -z "${DEVICE}" || -z "${OUT_DIR}" ]] && { usage; exit 1; }
+OUT_DIR="${OUT_DIR#local:}"
+OUT_DIR="${OUT_DIR#remote:}"
+case "${APPROACH}" in
+  screen-detach|nohup|screen-attach) ;;
+  *) echo "Unknown --approach: ${APPROACH} (use screen-detach|nohup|screen-attach)" >&2; exit 1 ;;
+esac
+if [[ "${REMOTE_DIR}" == *"/USER/"* ]]; then
+  echo "ERROR: replace USER in --remote-dir (got: ${REMOTE_DIR})" >&2
+  exit 1
+fi
+if [[ "${OUT_DIR}" == *"/USER/"* ]]; then
+  echo "ERROR: replace USER in --out-dir (got: ${OUT_DIR})" >&2
+  exit 1
+fi
+
+ssh_base=(ssh -o BatchMode=yes -o ConnectTimeout=10
+  -o ServerAliveInterval=30 -o ServerAliveCountMax=240
+  "${SSH_USER}@${HOST}")
+
+echo "==> [1/3] Checking SSH ${SSH_USER}@${HOST} ..."
+"${ssh_base[@]}" "echo ok >/dev/null"
+
+echo "==> [2/3] rsync ${PKG_DIR}/ → ${SSH_USER}@${HOST}:${REMOTE_DIR}/"
+RSYNC_FLAGS=(-avz --delete
+  --exclude '.git/'
+  --exclude '.DS_Store'
+  --exclude 'state.env'
+  --exclude '*.img'
+  --exclude '*.img.zst'
+  --exclude '*.img.gz')
+if [[ "${DRY_SYNC}" -eq 1 ]]; then
+  RSYNC_FLAGS+=(-n)
+fi
+# Trailing slash: copy contents into remote-dir
+rsync "${RSYNC_FLAGS[@]}" \
+  -e "ssh -o BatchMode=yes -o ConnectTimeout=10" \
+  "${PKG_DIR}/" "${SSH_USER}@${HOST}:${REMOTE_DIR}/"
+
+if [[ "${DRY_SYNC}" -eq 1 ]]; then
+  echo "Dry-sync only. Re-run without --dry-sync to copy and start."
+  exit 0
+fi
+
+EXEC_ARGS=(--host local --device "${DEVICE}" --out-dir "local:${OUT_DIR}"
+  --mode raw --lang "${LANG_CODE}")
+[[ "${EXECUTE}" -eq 1 ]] && EXEC_ARGS+=(--execute)
+[[ "${YES_FLAG}" -eq 1 ]] && EXEC_ARGS+=(--yes)
+# shellcheck disable=SC2089
+IMAGER_CMD="./bin/usb-disk-imager ${EXEC_ARGS[*]}"
+
+LOG_FILE="${OUT_DIR}/udi-run.log"
+PID_FILE="${OUT_DIR}/udi-run.pid"
+PROGRESS_GLOB="${OUT_DIR}/*.progress"
+
+echo "==> [3/3] Start on NAS via --approach=${APPROACH}"
+echo "    Remote tool: ${REMOTE_DIR}"
+echo "    Out dir:     ${OUT_DIR}"
+echo "    Command:     ${IMAGER_CMD}"
+
+case "${APPROACH}" in
+  screen-detach)
+    "${ssh_base[@]}" "mkdir -p '${OUT_DIR}' '${REMOTE_DIR}' && \
+      if ! command -v screen >/dev/null 2>&1; then echo 'ERROR: screen not found; use --approach nohup' >&2; exit 1; fi && \
+      cd '${REMOTE_DIR}' && \
+      TERM=vt100 screen -ls 2>/dev/null | grep -q '[.]${SESSION_NAME}[[:space:]]' && \
+        { echo \"ERROR: screen session '${SESSION_NAME}' already exists. Attach: TERM=vt100 screen -r ${SESSION_NAME}\"; exit 1; } || true && \
+      TERM=vt100 screen -dmS '${SESSION_NAME}' bash -lc 'cd \"${REMOTE_DIR}\" && ${IMAGER_CMD}; echo EXIT:\$?; exec bash' && \
+      sleep 1 && TERM=vt100 screen -ls"
+    cat << EOF
+
+Started detached screen '${SESSION_NAME}' on ${HOST}.
+Mac can sleep / disconnect.
+
+  Attach:    ssh -t ${SSH_USER}@${HOST} 'export TERM=vt100; screen -r ${SESSION_NAME}'
+  Progress:  ./bin/udi-watch-progress --host ${HOST} --user ${SSH_USER} --file ${OUT_DIR}/<name>.img.zst
+  One-shot:  ssh ${SSH_USER}@${HOST} 'cat ${PROGRESS_GLOB} 2>/dev/null; ls -lh ${OUT_DIR}/*.img.zst 2>/dev/null'
+  Log hint:  progress also prints inside the screen session every ~10s
+EOF
+    ;;
+  nohup)
+    "${ssh_base[@]}" "mkdir -p '${OUT_DIR}' && cd '${REMOTE_DIR}' && \
+      nohup ${IMAGER_CMD} > '${LOG_FILE}' 2>&1 & echo \$! > '${PID_FILE}' && \
+      echo \"pid=\$(cat '${PID_FILE}')\" && sleep 1 && head -n 20 '${LOG_FILE}' || true"
+    cat << EOF
+
+Started nohup on ${HOST}.
+  PID file:  ${PID_FILE}
+  Log:       ssh ${SSH_USER}@${HOST} 'tail -f ${LOG_FILE}'
+  Progress:  ./bin/udi-watch-progress --host ${HOST} --user ${SSH_USER} --file ${OUT_DIR}/<name>.img.zst
+  Alive?:    ssh ${SSH_USER}@${HOST} 'ps -p \$(cat ${PID_FILE}) -o pid,etime,cmd'
+EOF
+    ;;
+  screen-attach)
+    echo "rsync done. Opening interactive screen (Ctrl-A D to detach)..."
+    # -t: allocate TTY for screen
+    ssh -t -o ConnectTimeout=10 \
+      -o ServerAliveInterval=30 -o ServerAliveCountMax=240 \
+      "${SSH_USER}@${HOST}" \
+      "mkdir -p '${OUT_DIR}' && cd '${REMOTE_DIR}' && export TERM=vt100 && \
+       if ! command -v screen >/dev/null 2>&1; then echo 'ERROR: screen not found; use --approach nohup' >&2; exit 1; fi && \
+       if TERM=vt100 screen -ls 2>/dev/null | grep -q '[.]${SESSION_NAME}[[:space:]]'; then \
+         echo 'Reattaching existing session ${SESSION_NAME}...'; exec screen -r '${SESSION_NAME}'; \
+       else \
+         exec screen -S '${SESSION_NAME}' bash -lc 'cd \"${REMOTE_DIR}\" && ${IMAGER_CMD}; echo EXIT:\$?; exec bash'; \
+       fi"
+    ;;
+esac
