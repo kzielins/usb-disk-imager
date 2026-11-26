@@ -6,6 +6,10 @@
 # QNAP BusyBox often has NO mkfifo — do NOT use named pipes.
 # Pipeline: dd | tee >(sha256sum) | zstd/gzip   (bash process substitution)
 # Progress: percent = bytes read from device (/proc/<dd>/fdinfo) / TOTAL
+#
+# Important: resolve final image path (zst vs gz) BEFORE starting the monitor,
+# otherwise .udi-job and *.progress point at different files and udi-status
+# shows a stale 0% forever while the real .img.gz grows.
 set -eu
 set -o pipefail 2>/dev/null || true
 
@@ -15,15 +19,50 @@ STARTED_UTC="${STARTED_UTC:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 JOB_FILE="${JOB_FILE:-$(dirname "${RPATH}")/.udi-job}"
 
 mkdir -p "${RDIR}"
+echo "PIPELINE_START $(date -u +%Y-%m-%dT%H:%M:%SZ) DEV=${DEV} COMP=${COMP} RPATH=${RPATH}"
+
 if ! [ -r "${DEV}" ]; then
   echo "ERROR: cannot read ${DEV} (Permission denied?). Use admin/root." >&2
   exit 1
 fi
 
-# Need bash process substitution (this file is always run with bash).
 if [ -z "${BASH_VERSION:-}" ]; then
   echo "ERROR: image-pipeline.sh must run under bash (not sh/ash)." >&2
   exit 1
+fi
+
+# Prefer real zstd binary if present on QTS (often missing from PATH for non-login shells).
+find_zstd() {
+  local c
+  for c in zstd /usr/bin/zstd /usr/local/bin/zstd /opt/bin/zstd /share/CACHEDEV1_DATA/.qpkg/*/bin/zstd; do
+    if command -v "${c}" >/dev/null 2>&1; then command -v "${c}"; return 0; fi
+    if [ -x "${c}" ]; then printf '%s\n' "${c}"; return 0; fi
+  done
+  return 1
+}
+
+ZSTD_BIN=""
+USE_ZSTD=0
+if [ "${COMP}" = "zstd" ]; then
+  if ZSTD_BIN=$(find_zstd); then
+    USE_ZSTD=1
+    echo "Using zstd: ${ZSTD_BIN}"
+  else
+    echo "WARN: zstd not found — falling back to gzip (.img.gz)."
+    COMP=gzip
+  fi
+fi
+
+if [ "${USE_ZSTD}" -ne 1 ]; then
+  case "${RPATH}" in
+    *.zst) RPATH="${RPATH%.zst}.gz" ;;
+    *.gz) ;;
+    *) RPATH="${RPATH}.gz" ;;
+  esac
+  RSHA="${RPATH}.sha256"
+  RPROG="${RPATH}.progress"
+  RBASE="$(basename "${RPATH}")"
+  COMP=gzip
 fi
 
 human_bytes() {
@@ -57,6 +96,7 @@ out_bytes=${ob}
 rate_bytes_per_sec=${rate}
 eta_seconds=${eta}
 started_utc=${STARTED_UTC}
+compressor=${COMP}
 human=${human}
 PROG
   printf "%s\n" "${human}" >&2
@@ -71,6 +111,7 @@ progress=${RPROG}
 sha256=${RSHA}
 total_bytes=${TOTAL}
 started_utc=${STARTED_UTC}
+compressor=${COMP}
 status=running
 JOB
 }
@@ -81,8 +122,17 @@ find_dd_pid() {
     [ -r "${p}/cmdline" ] || continue
     cmd=$(tr '\0' ' ' < "${p}/cmdline" 2>/dev/null || true)
     case "${cmd}" in
-      dd\ if="${DEV}"*|dd\ if=${DEV}\ *) basename "${p}"; return 0 ;;
+      dd\ if="${DEV}"*|dd\ if=${DEV}\ *|dd\ if=${DEV}|*dd\ if="${DEV}"*|*"dd if=${DEV}"*)
+        basename "${p}"; return 0 ;;
     esac
+    # BusyBox sometimes shows only "dd" — match open fd to our device if possible
+    if [ -L "${p}/fd/0" ]; then
+      local tgt
+      tgt=$(readlink "${p}/fd/0" 2>/dev/null || true)
+      case "${tgt}" in
+        "${DEV}"|"${DEV}"*) basename "${p}"; return 0 ;;
+      esac
+    fi
   done
   return 1
 }
@@ -117,17 +167,18 @@ monitor_dd() {
   done
 }
 
-# Background progress: discover dd PID after pipeline starts (no mkfifo needed).
+# Background progress AFTER final RPATH/RPROG are known.
 monitor_loop() {
   local dd_pid="" i
-  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
     if dd_pid=$(find_dd_pid); then
+      echo "MONITOR dd_pid=${dd_pid}"
       monitor_dd "${dd_pid}"
       return 0
     fi
     sleep 1
   done
-  # Fallback: still emit heartbeats from compressed size (percent stays 0 until done)
+  echo "WARN: dd pid not found — heartbeats use out_bytes only (percent stays 0 until done)"
   while true; do
     write_prog "0" "0" "imaging" "" "0"
     sleep 5
@@ -140,17 +191,12 @@ monitor_loop &
 mon_pid=$!
 
 rc=0
-if command -v zstd >/dev/null 2>&1 && [ "${COMP}" = "zstd" ]; then
+if [ "${USE_ZSTD}" -eq 1 ]; then
   dd if="${DEV}" bs=4M 2>/dev/null \
     | tee >(sha256sum | awk -v f="${RBASE}" '{print $1 "  " f}' > "${RSHA}") \
-    | zstd -T0 -3 -f -o "${RPATH}"
+    | "${ZSTD_BIN}" -T0 -3 -f -o "${RPATH}"
   rc=$?
 else
-  RPATH="${RPATH%.zst}.gz"
-  RSHA="${RPATH}.sha256"
-  RPROG="${RPATH}.progress"
-  RBASE="$(basename "${RPATH}")"
-  write_job
   dd if="${DEV}" bs=4M 2>/dev/null \
     | tee >(sha256sum | awk -v f="${RBASE}" '{print $1 "  " f}' > "${RSHA}") \
     | gzip -6 > "${RPATH}"
@@ -177,4 +223,5 @@ if [ "${ob}" -lt 1024 ]; then
   echo "ERROR: output image is tiny (${ob} bytes) — imaging likely failed." >&2
   exit 1
 fi
+echo "PIPELINE_DONE $(date -u +%Y-%m-%dT%H:%M:%SZ) out_bytes=${ob} rc=${rc}"
 exit 0

@@ -1,51 +1,41 @@
 # HOWTO — interaktywny plan na Macu, dump w tle na NAS
 
-Repo: [usb-disk-imager](https://github.com/kzielins/usb-disk-imager) | v2.2.8+
+Repo: [usb-disk-imager](https://github.com/kzielins/usb-disk-imager) | v2.2.9+
 
 **Wymaganie:** Mac może się rozłączyć na 12–40 h. Długi dump musi iść **na NAS** (screen), nie przez otwarte SSH z Maca.
 
-## Flow
+## Flow (jedna ścieżka)
 
-1. Mac: interaktywne TUI — wybór dysku + katalogu → **PODSUMOWANIE**.
-2. Jedno pytanie: **„Uruchomić dump w tle na NAS? Wpisz TAK”** (Enter = nie).
-3. Po TAK: job leci na NAS (`screen udi-sdc`); Mac dostaje komendy monitora i możesz się rozłączyć.
-4. Monitor: `./bin/udi-status … --watch`.
+1. Mac: `cd` + `git pull` + interaktywne TUI (strzałki).
+2. Po **PODSUMOWANIU**: menu **TAK / NIE** (strzałki) — TAK = zapis w tle na NAS.
+3. Tool **weryfikuje**, że `dd`/`gzip`/`zstd` żyje + `udi-run.log` ma `LAUNCH`.
+4. Auto-start `udi-status --watch` (Ctrl-C = tylko monitor; job na NAS zostaje).
+5. Mac możesz zamknąć.
 
-Docelowy katalog w Twoim ostatnim planie:
-`remote:/share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261126`
+Docelowy katalog (Twój bieżący job):
+`/share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261126`
 
 ---
 
-## 0) Mac — update
+## 0) Mac — update (zawsze pierwsze)
 
 ```bash
 cd ~/src/usb-disk-imager
 git fetch origin && git checkout main && git reset --hard origin/main
 ```
 
-## 1) Interaktywny start (menu), potem auto-detach na NAS
+## 1) Start (interaktywny)
 
 ```bash
 cd ~/src/usb-disk-imager
 ./bin/usb-disk-imager --host kznas3-1 --user admin --lang pl
 ```
 
-- Wybierz dysk / katalog jak zawsze.
-- Na EXECUTE (albo komenda z podsumowania z `--execute`): dump **nie** zostaje na kablu SSH.
-- Zobaczysz `DETACHED on NAS session 'udi-sdc'` → Mac wolny.
+- User **`admin`** (musi czytać `/dev/sdc`).
+- Po podsumowaniu: strzałkami **TAK — uruchom dump w tle**.
+- Nie używaj długiego dumpa z `local:` na Macu.
 
-Albo od razu CLI (też detachuje przy `remote:`):
-
-```bash
-./bin/usb-disk-imager --host kznas3-1 --user admin --device /dev/sdc \
-  --out-dir remote:/share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261126 \
-  --mode raw --lang pl --execute --yes
-```
-
-`--out-dir remote:…` = zapis na NAS + **detach**.  
-Nie używaj długiego dumpa z `local:` na Macu.
-
-## 2) Monitor (Mac może być gdzie indziej)
+## 2) Monitor (jedna komenda)
 
 ```bash
 cd ~/src/usb-disk-imager
@@ -54,24 +44,38 @@ cd ~/src/usb-disk-imager
   --watch
 ```
 
-## 3) Wróć do screena na NAS
+Patrz na linie:
+- **Live size** — jeśli rośnie, dump idzie (nawet gdy % = 0).
+- **Processes** — powinno być `dd` / `gzip` albo `zstd`.
+- **Out file / Image** — może być `.img.gz` (gdy na NAS nie ma `zstd`).
+
+## 3) Diag (gdy coś wygląda źle — wklej cały output)
 
 ```bash
-ssh -t admin@kznas3-1 'export TERM=vt100; screen -r udi-sdc'
+cd ~/src/usb-disk-imager
+./bin/udi-diag --host kznas3-1 --user admin \
+  --dir /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261126
 ```
 
-(`udi-sdc` = `udi-` + basename urządzenia. Lista: `ssh admin@kznas3-1 'export TERM=vt100; screen -ls'`)
-
-Detach znowu: `Ctrl-A` `D`.
-
-## 4) Log
+Albo surowy wzrost pliku (bez statusa):
 
 ```bash
+cd ~/src/usb-disk-imager
+ssh admin@kznas3-1 'F=/share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261126/kznas3-1-sdc-Windows-EFI-20261126-20261126-124124Z.img.gz; ls -lh "$F"; sleep 10; ls -lh "$F"; ps w | grep -E "[d]d |[g]zip|[z]std" | grep -v grep'
+```
+
+## 4) Screen / log na NAS
+
+```bash
+ssh -t admin@kznas3-1 'export TERM=vt100; screen -ls; screen -r udi-sdc'
 ssh admin@kznas3-1 'tail -f /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261126/udi-run.log'
 ```
 
-## Uwagi
+Detach screena: `Ctrl-A` `D`.
 
-- User **`admin`** do `/dev/sdc` (nie `kzielins`).
-- `screen` na Macu ≠ job na NAS. Od v2.2.7 execute z `remote:` samo podnosi screen na NAS.
-- Jeśli jesteś **już** na NAS (`--host local` w screenie), job leci na pierwszym planie w tej sesji — też OK.
+## Uwagi (QTS)
+
+- v2.2.9: launcher **bez** `bash -lc` (profil QTS wieszał screen bez `dd` i bez loga).
+- Brak `zstd` na PATH → fallback **gzip** (`.img.gz`). To OK — dump działa.
+- Stary `*.img.zst.progress` przy 0% + rosnący `.img.gz` = monitor patrzył w zły plik (naprawione w 2.2.9).
+- **Nie zabijaj** działającego joba tylko dlatego, że status pokazuje 0%.

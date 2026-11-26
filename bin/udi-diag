@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# One-shot NAS job diagnostics (process + file size + progress + log).
+# ALWAYS:
+#   cd ~/src/usb-disk-imager && git pull origin main
+#   ./bin/udi-diag --host <nas> --user admin --dir <job-folder-on-nas>
+set -euo pipefail
+
+HOST="" USER_NAME="admin" DIR=""
+
+usage() {
+  cat << 'USAGE'
+Usage:
+  cd ~/src/usb-disk-imager && git pull origin main
+  ./bin/udi-diag --host <nas> --user admin --dir <job-folder-on-nas>
+
+Prints: date, screen, dd/gzip/zstd processes, dir listing, image sizes
+(twice / 5s apart), .udi-job, *.progress, udi-run.log, /dev readability.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -H|--host) HOST="$2"; shift 2 ;;
+    -u|--user) USER_NAME="$2"; shift 2 ;;
+    --dir) DIR="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown: $1" >&2; usage; exit 1 ;;
+  esac
+done
+
+[[ -n "${HOST}" && -n "${DIR}" ]] || { usage; exit 1; }
+DIR="${DIR#remote:}"; DIR="${DIR#local:}"
+
+ssh -o BatchMode=yes -o ConnectTimeout=15 \
+  -o ServerAliveInterval=30 -o ServerAliveCountMax=12 \
+  "${USER_NAME}@${HOST}" bash -s -- "${DIR}" << 'REMOTE'
+set -eu
+D="$1"
+export TERM=vt100
+echo "===== DATE ====="; date -u; date
+echo "===== SCREEN ====="; screen -ls 2>&1 || true
+echo "===== PS (dd/zstd/gzip/pipeline) ====="
+ps w | grep -E '[d]d if=|[z]std|[g]zip|udi-image-pipeline|udi-launch|udi-sdc|SCREEN' || true
+echo "===== /tmp udi-* ====="; ls -la /tmp/udi-* 2>&1 || true
+echo "===== DIR ====="; ls -la "${D}" 2>&1 || true
+echo "===== IMAGE SIZE t0 ====="
+ls -lh "${D}"/*.img.zst "${D}"/*.img.gz 2>&1 || echo "(no image yet)"
+echo "===== sleep 5s ====="; sleep 5
+echo "===== IMAGE SIZE t1 ====="
+ls -lh "${D}"/*.img.zst "${D}"/*.img.gz 2>&1 || echo "(no image yet)"
+echo "===== .udi-job ====="; cat "${D}/.udi-job" 2>&1 || true
+echo "===== *.progress ====="
+for f in "${D}"/*.progress; do
+  [ -f "$f" ] || continue
+  echo "--- $f ---"; cat "$f"
+done
+echo "===== udi-run.log (tail 80) ====="
+tail -n 80 "${D}/udi-run.log" 2>&1 || echo "(no udi-run.log)"
+echo "===== hardcopy udi-sdc ====="
+screen -S udi-sdc -X hardcopy /tmp/udi-sdc-hardcopy.txt 2>&1 || true
+cat /tmp/udi-sdc-hardcopy.txt 2>&1 || echo "(no hardcopy)"
+echo "===== device read ====="
+# device from job if present
+dev=$(awk -F= '/^device=/{print $2; exit}' "${D}/.udi-job" 2>/dev/null || true)
+dev="${dev:-/dev/sdc}"
+if [ -r "${dev}" ]; then echo "READ_OK ${dev}"; else echo "READ_FAIL ${dev}"; fi
+ls -l "${dev}" 2>&1 || true
+echo "===== DONE ====="
+REMOTE

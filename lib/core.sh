@@ -129,9 +129,13 @@ _udi_run_image_pipeline() {
 
 # Upload pipeline + start screen/nohup ON THE NAS, then return immediately.
 # Survives Mac sleep / Tailscale disconnect.
+#
+# QTS pitfall: `bash -lc '…'` often hangs on login profile and never starts dd.
+# Fix: write a self-contained launcher under /tmp and run it with
+# `bash --noprofile --norc`. Verify udi-run.log + dd/zstd within ~15s.
 detach_raw_image_on_nas() {
   local device="$1" rpath="$2" rsha="$3" compressor="$4" total_bytes="$5"
-  local rdir rbase rprog pipe session log remote_pipe
+  local rdir rbase rprog pipe session log remote_pipe remote_launch verify
   rdir="$(dirname "${rpath}")"
   rbase="$(basename "${rpath}")"
   rprog="${rpath}.progress"
@@ -139,6 +143,7 @@ detach_raw_image_on_nas() {
   session="udi-$(basename "${device}")"
   log="${rdir}/udi-run.log"
   remote_pipe="/tmp/udi-image-pipeline.${session}.sh"
+  remote_launch="/tmp/udi-launch.${session}.sh"
 
   log_info "Starting DETACHED job on NAS screen '${session}' (not tied to this Mac SSH)."
   log_info "Progress: ${rprog}"
@@ -151,46 +156,130 @@ detach_raw_image_on_nas() {
   ssh -o BatchMode=yes -o ConnectTimeout=10 \
     "${SSH_USER}@${HOST}" "cat > $(printf '%q' "${remote_pipe}")" < "${pipe}" || return 1
 
-  # Launch screen -dmS (preferred) or nohup. Job keeps running after this SSH exits.
-  ssh -o BatchMode=yes -o ConnectTimeout=10 \
+  # Write launcher + start screen/nohup. Verify dd actually started.
+  verify="$(ssh -o BatchMode=yes -o ConnectTimeout=10 \
+    -o ServerAliveInterval=30 -o ServerAliveCountMax=12 \
     "${SSH_USER}@${HOST}" bash -s -- \
     "${device}" "${rpath}" "${rsha}" "${rprog}" "${rbase}" "${compressor}" "${total_bytes}" \
-    "${rdir}" "${session}" "${log}" "${remote_pipe}" << 'REMOTE_DETACH'
+    "${rdir}" "${session}" "${log}" "${remote_pipe}" "${remote_launch}" << 'REMOTE_DETACH'
 set -eu
 DEV="$1"; RPATH="$2"; RSHA="$3"; RPROG="$4"; RBASE="$5"; COMP="$6"; TOTAL="$7"
-RDIR="$8"; SESSION="$9"; LOG="${10}"; PIPE="${11}"
+RDIR="$8"; SESSION="$9"; LOG="${10}"; PIPE="${11}"; LAUNCH="${12}"
 export TERM=vt100
 mkdir -p "${RDIR}"
-# Drop stale session with same name
+: > "${LOG}"
+# Drop stale session with same name (zombie bash -lc from older versions)
 if command -v screen >/dev/null 2>&1; then
   if screen -ls 2>/dev/null | grep -q "[.]${SESSION}[[:space:]]"; then
     screen -S "${SESSION}" -X quit 2>/dev/null || true
     sleep 1
   fi
-  # shellcheck disable=SC2086
-  screen -dmS "${SESSION}" bash -lc "export DEV='${DEV}' RPATH='${RPATH}' RSHA='${RSHA}' RPROG='${RPROG}' RBASE='${RBASE}' COMP='${COMP}' TOTAL='${TOTAL}' RDIR='${RDIR}' DEVICE_LABEL='${DEV}' JOB_FILE='${RDIR}/.udi-job' STARTED_UTC=\$(date -u +%Y-%m-%dT%H:%M:%SZ); bash '${PIPE}' >> '${LOG}' 2>&1; ec=\$?; echo EXIT:\$ec >> '${LOG}'; exec bash"
+fi
+# Self-contained launcher — NO bash -lc (QTS login profile can hang forever).
+cat > "${LAUNCH}" << LAUNCH_EOF
+#!/usr/bin/env bash
+export TERM=vt100
+export DEV=$(printf '%q' "${DEV}")
+export RPATH=$(printf '%q' "${RPATH}")
+export RSHA=$(printf '%q' "${RSHA}")
+export RPROG=$(printf '%q' "${RPROG}")
+export RBASE=$(printf '%q' "${RBASE}")
+export COMP=$(printf '%q' "${COMP}")
+export TOTAL=$(printf '%q' "${TOTAL}")
+export RDIR=$(printf '%q' "${RDIR}")
+export DEVICE_LABEL=$(printf '%q' "${DEV}")
+export JOB_FILE=$(printf '%q' "${RDIR}/.udi-job")
+export STARTED_UTC="\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+LOG=$(printf '%q' "${LOG}")
+PIPE=$(printf '%q' "${PIPE}")
+exec >>"\${LOG}" 2>&1
+echo "LAUNCH \$(date -u +%Y-%m-%dT%H:%M:%SZ) session=${SESSION} device=\${DEV}"
+echo "PIPE=\${PIPE}"
+if [ ! -f "\${PIPE}" ]; then
+  echo "ERROR: pipeline script missing: \${PIPE}"
+  exit 127
+fi
+if [ ! -r "\${DEV}" ]; then
+  echo "ERROR: cannot read \${DEV} (Permission denied?). Use admin/root."
+  exit 1
+fi
+bash --noprofile --norc "\${PIPE}"
+ec=\$?
+echo "EXIT:\${ec} \$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+exit "\${ec}"
+LAUNCH_EOF
+chmod 755 "${LAUNCH}"
+
+if command -v screen >/dev/null 2>&1; then
+  screen -dmS "${SESSION}" env TERM=vt100 bash --noprofile --norc "${LAUNCH}"
   sleep 2
   screen -ls || true
   echo "DETACH_OK screen=${SESSION}"
 else
-  nohup bash -c "export DEV='${DEV}' RPATH='${RPATH}' RSHA='${RSHA}' RPROG='${RPROG}' RBASE='${RBASE}' COMP='${COMP}' TOTAL='${TOTAL}' RDIR='${RDIR}' DEVICE_LABEL='${DEV}' JOB_FILE='${RDIR}/.udi-job'; bash '${PIPE}'" >> "${LOG}" 2>&1 &
+  nohup env TERM=vt100 bash --noprofile --norc "${LAUNCH}" >/dev/null 2>&1 &
   echo $! > "${RDIR}/udi-run.pid"
   sleep 2
   echo "DETACH_OK nohup pid=$(cat "${RDIR}/udi-run.pid")"
 fi
-# Show first log lines if any
-tail -n 20 "${LOG}" 2>/dev/null || true
+
+# Prove the job actually started (not a zombie screen).
+ok=0
+i=0
+while [ "${i}" -lt 20 ]; do
+  i=$((i + 1))
+  if [ -f "${LOG}" ] && grep -q '^LAUNCH ' "${LOG}" 2>/dev/null; then
+    if grep -qE 'ERROR:|EXIT:[1-9]' "${LOG}" 2>/dev/null; then
+      echo "DETACH_FAIL early_error"
+      tail -n 40 "${LOG}" || true
+      exit 1
+    fi
+    if ps w 2>/dev/null | grep -E "[d]d if=${DEV}|[z]std |[g]zip " >/dev/null 2>&1; then
+      echo "DETACH_VERIFY dd_or_zstd_running"
+      ok=1
+      break
+    fi
+    if [ -f "${RPROG}" ] && grep -q '^stage=' "${RPROG}" 2>/dev/null; then
+      # pipeline at least wrote progress (dd may take a moment on slow USB)
+      if [ "${i}" -ge 8 ]; then
+        echo "DETACH_VERIFY progress_file_present"
+        ok=1
+        break
+      fi
+    fi
+  fi
+  sleep 1
+done
+echo "----- udi-run.log (head) -----"
+head -n 40 "${LOG}" 2>/dev/null || echo "(no log yet)"
+echo "----- processes -----"
+ps w 2>/dev/null | grep -E "[d]d if=|[z]std |[g]zip |udi-image-pipeline|udi-launch" || true
+ls -lh "${RPATH}" 2>/dev/null || echo "(image not created yet)"
+if [ "${ok}" -ne 1 ]; then
+  echo "DETACH_FAIL no_dd_after_wait"
+  exit 1
+fi
+echo "DETACH_VERIFY_OK"
 REMOTE_DETACH
-  local rc=$?
-  [[ "${rc}" -eq 0 ]] || return "${rc}"
+)" || {
+    log_err "NAS detach FAILED — screen may be empty. See above / udi-run.log on NAS."
+    log_err "Debug: ssh ${SSH_USER}@${HOST} 'export TERM=vt100; screen -ls; tail -50 ${log}; ls -lh ${rdir}'"
+    return 1
+  }
+
+  printf '%s\n' "${verify}"
+  echo "${verify}" | grep -q "DETACH_VERIFY_OK" || {
+    log_err "NAS job did not start imaging (no dd/zstd). Refusing to claim success."
+    return 1
+  }
 
   UDI_DETACHED=1
   UDI_DETACH_SESSION="${session}"
   UDI_DETACH_DIR="${rdir}"
-  log_info "NAS job detached. Mac may disconnect NOW."
+  log_info "NAS job detached and VERIFIED (dd/zstd or progress alive). Mac may disconnect NOW."
   log_info "Monitor:  ./bin/udi-status --host ${HOST} --user ${SSH_USER} --dir '${rdir}' --watch"
   log_info "Attach:   ssh -t ${SSH_USER}@${HOST} 'export TERM=vt100; screen -r ${session}'"
   log_info "Log tail: ssh ${SSH_USER}@${HOST} 'tail -f ${log}'"
+  log_info "File size: ssh ${SSH_USER}@${HOST} 'ls -lh ${rpath}; sleep 5; ls -lh ${rpath}'"
   return 0
 }
 
