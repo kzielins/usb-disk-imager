@@ -15,6 +15,8 @@ test -f "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
 grep -q "git pull origin main" "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
 grep -q "cd ~/src/usb-disk-imager" "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
 grep -q "git pull origin main" "${PKG_DIR}/README.md"
+grep -q 'mkdir -p' "${PKG_DIR}/bin/udi-rsync-run"
+grep -q "Do not" "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
 # udi-status: parse synthetic progress (real % formula)
 TMPJ=$(mktemp -d)
 cat > "${TMPJ}/demo.img.zst.progress" << 'P'

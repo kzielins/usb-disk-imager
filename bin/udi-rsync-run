@@ -119,7 +119,9 @@ ssh_base=(ssh -o BatchMode=yes -o ConnectTimeout=10
 echo "==> [1/3] Checking SSH ${SSH_USER}@${HOST} ..."
 "${ssh_base[@]}" "echo ok >/dev/null"
 
-echo "==> [2/3] rsync ${PKG_DIR}/ → ${SSH_USER}@${HOST}:${REMOTE_DIR}/"
+echo "==> [2/3] mkdir -p + rsync → ${SSH_USER}@${HOST}:${REMOTE_DIR}/"
+# Old QNAP rsync cannot create missing parent dirs (e.g. .../ops/...).
+"${ssh_base[@]}" "mkdir -p $(printf '%q' "${REMOTE_DIR}") $(printf '%q' "${OUT_DIR}")"
 RSYNC_FLAGS=(-avz --delete
   --exclude '.git/'
   --exclude '.DS_Store'
