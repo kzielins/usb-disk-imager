@@ -59,41 +59,39 @@ git pull origin main
 
 ## 2) From Mac — start dump
 
-### A) INTERACTIVE wizard (menus like before) — recommended if you want TUI
+### A) INTERACTIVE wizard (menus) — paste ONE line
 
-You **see** disk/dir prompts inside `screen`. Ctrl-A D detaches.
+Kills any stale `udi-dump` screen (old bare admin shell), then starts **fresh** `usb-disk-imager` TUI.
 
 ```bash
-cd ~/src/usb-disk-imager
-git pull origin main
-
-./bin/udi-rsync-run --host kznas3-1 --user admin --remote-dir /share/homes/kzielins/ops/usb-disk-imager --approach wizard
+cd ~/src/usb-disk-imager && git pull origin main && ./bin/udi-rsync-run --host kznas3-1 --user admin --remote-dir /share/homes/kzielins/ops/usb-disk-imager --approach wizard
 ```
 
-(One line — paste-safe.)
+You must see `=== usb-disk-imager wizard ===` then disk/dir menus — **not** a plain `#` admin shell. Ctrl-A D detaches.
 
-### B) FIRE-AND-FORGET (NO menus — that is why you saw nothing)
-
-`--execute --yes` skips all TUI. Job runs in detached screen; use `udi-status` / `screen -r` to watch.
+Manual cleanup if you still land in a dead shell:
 
 ```bash
-cd ~/src/usb-disk-imager
-git pull origin main
+ssh admin@kznas3-1 'export TERM=vt100; screen -S udi-dump -X quit; screen -ls'
+```
 
-./bin/udi-rsync-run --host kznas3-1 --user admin --device /dev/sdc --out-dir /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125 --remote-dir /share/homes/kzielins/ops/usb-disk-imager --approach screen-detach --lang pl --execute --yes
+Then re-run the wizard line above.
+
+### B) FIRE-AND-FORGET (NO menus)
+
+```bash
+cd ~/src/usb-disk-imager && git pull origin main && ./bin/udi-rsync-run --host kznas3-1 --user admin --device /dev/sdc --out-dir /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125 --remote-dir /share/homes/kzielins/ops/usb-disk-imager --approach screen-detach --lang pl --execute --yes
 ```
 
 ### C) nohup (also non-interactive)
 
-Same flags as B, `--approach nohup`.
+Same as B with `--approach nohup`.
 
-### See / take over existing screen (your current `udi-dump`)
+### Reattach only (no new wizard)
 
 ```bash
-ssh -t admin@kznas3-1 'export TERM=vt100; screen -r udi-dump'
+cd ~/src/usb-disk-imager && ./bin/udi-rsync-run --host kznas3-1 --user admin --remote-dir /share/homes/kzielins/ops/usb-disk-imager --approach wizard --reattach
 ```
-
-If “Attached elsewhere”: `screen -d -r udi-dump`.
 
 ---
 
