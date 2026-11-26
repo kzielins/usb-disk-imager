@@ -15,11 +15,12 @@ test -x "${PKG_DIR}/bin/udi-rsync-run"
 grep -q "screen -S.*-X quit" "${PKG_DIR}/bin/udi-rsync-run"
 test -f "${PKG_DIR}/lib/image-pipeline.sh"
 test -f "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
-grep -q "git pull origin main" "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
 grep -q "cd ~/src/usb-disk-imager" "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
-grep -q "git pull origin main" "${PKG_DIR}/README.md"
+grep -q "git reset --hard origin/main" "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
+grep -q "./bin/usb-disk-imager --host" "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
+grep -q "screen -S udi-dump" "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
+grep -q "udi-status" "${PKG_DIR}/README.md"
 grep -q 'mkdir -p' "${PKG_DIR}/bin/udi-rsync-run"
-grep -q "Do not" "${PKG_DIR}/docs/HOWTO-MAC-TO-NAS.md"
 # udi-status: parse synthetic progress (real % formula)
 TMPJ=$(mktemp -d)
 cat > "${TMPJ}/demo.img.zst.progress" << 'P'
