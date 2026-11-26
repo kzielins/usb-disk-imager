@@ -33,7 +33,7 @@ run_target() {
     out=$(bash -c "${cmd}" 2>"${err_file}") || rc=$?
   else
     _log_write "CMD" "run_target:${SSH_USER}@${HOST}" "ssh ${SSH_USER}@${HOST} -- ${cmd}"
-    out=$(ssh -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=15 "${SSH_USER}@${HOST}" "${cmd}" 2>"${err_file}") || rc=$?
+    out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=240 "${SSH_USER}@${HOST}" "${cmd}" 2>"${err_file}") || rc=$?
   fi
   if [[ -s "${err_file}" ]]; then
     _log_write "STDERR" "run_target:rc=${rc}" "$(tr '\n' ' ' < "${err_file}")"
@@ -41,6 +41,22 @@ run_target() {
   _log_write "DEBUG" "run_target" "rc=${rc} output_bytes=${#out}"
   rm -f "${err_file}"
   printf "%s" "${out}"
+  return "${rc}"
+}
+
+# Long jobs (imaging): keep SSH alive, stream stderr live, forward stdin (heredoc).
+run_target_live() {
+  local cmd="$1" rc=0
+  if [[ "${HOST}" == "local" ]]; then
+    _log_write "CMD" "run_target_live:local" "bash -c ${cmd}"
+    bash -c "${cmd}" || rc=$?
+  else
+    _log_write "CMD" "run_target_live:${SSH_USER}@${HOST}" "ssh ${SSH_USER}@${HOST} -- ${cmd}"
+    ssh -o BatchMode=yes -o ConnectTimeout=10 \
+      -o ServerAliveInterval=30 -o ServerAliveCountMax=240 \
+      "${SSH_USER}@${HOST}" "${cmd}" || rc=$?
+  fi
+  _log_write "DEBUG" "run_target_live" "rc=${rc}"
   return "${rc}"
 }
 get_device_bytes() {
@@ -86,18 +102,198 @@ detect_os_on_device() {
 REMOTE_OS
 }
 stream_raw_image() {
-  local device="$1" img_file="$2" sha_file="$3" compressor="$4" base; base="$(basename "${img_file}")"
+  local device="$1" img_file="$2" sha_file="$3" compressor="$4" total_bytes="${5:-0}"
+  local base; base="$(basename "${img_file}")"
   if [[ "${img_file}" == remote:* ]]; then
     local rpath="${img_file#remote:}"
     local rsha="${sha_file#remote:}"
     [[ -z "${rsha}" || "${rsha}" == "${sha_file}" ]] && rsha="${rpath}.sha256"
     local rdir; rdir="$(dirname "${rpath}")"
     local rbase; rbase="$(basename "${rpath}")"
-    run_target "mkdir -p '${rdir}' && if command -v zstd >/dev/null 2>&1 && [ '${compressor}' = 'zstd' ]; then fifo=\$(mktemp -u /tmp/udi-sha.XXXXXX) && mkfifo \"\$fifo\" && (sha256sum < \"\$fifo\" | awk -v f='${rbase}' '{print \$1 \"  \" f}' > '${rsha}') & sha_pid=\$! && dd if='${device}' bs=4M | tee \"\$fifo\" | zstd -T0 -3 -f -o '${rpath}'; rc=\$?; wait \"\$sha_pid\" || rc=\$?; rm -f \"\$fifo\"; exit \$rc; else dd if='${device}' bs=4M | gzip -6 > '${rpath%.zst}.gz'; fi"
+    local rprog="${rpath}.progress"
+    log_info "Progress file (poll without attach): ${rprog}"
+    log_info "Watch: ./bin/udi-watch-progress --host ${HOST} --user ${SSH_USER} --file '${rpath}'"
+    # Imaging runs on the target; progress goes to .progress + stderr (keeps SSH alive).
+    run_target_live "DEV='${device}' RPATH='${rpath}' RSHA='${rsha}' RPROG='${rprog}' RBASE='${rbase}' COMP='${compressor}' TOTAL='${total_bytes}' RDIR='${rdir}' bash -s" << 'REMOTE_IMG'
+set -eu
+set -o pipefail 2>/dev/null || true
+mkdir -p "${RDIR}"
+if ! [ -r "${DEV}" ]; then
+  echo "ERROR: cannot read ${DEV} (Permission denied?). Use admin/root or --host local as privileged user." >&2
+  exit 1
+fi
+out_bytes() {
+  if [ -f "${RPATH}" ]; then wc -c < "${RPATH}" 2>/dev/null | tr -d ' '; else echo 0; fi
+}
+write_prog() {
+  local pos="$1" pct="$2" stage="$3"
+  local ob; ob="$(out_bytes)"
+  local line
+  line=$(printf "%s | stage=%s | read=%s/%s (%s%%) | out_bytes=%s" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${stage}" "${pos}" "${TOTAL}" "${pct}" "${ob}")
+  printf "%s\n" "${line}" > "${RPROG}"
+  printf "%s\n" "${line}" >&2
+}
+monitor_dd() {
+  local pid="$1"
+  local pos=0 pct=0
+  while kill -0 "${pid}" 2>/dev/null; do
+    if [ -r "/proc/${pid}/fdinfo/0" ]; then
+      pos=$(awk '/^pos:/ {print $2; exit}' "/proc/${pid}/fdinfo/0" 2>/dev/null || echo "${pos}")
+    fi
+    pct=0
+    if [ "${TOTAL}" -gt 0 ] 2>/dev/null; then
+      pct=$((pos * 100 / TOTAL))
+      [ "${pct}" -gt 100 ] && pct=100
+    fi
+    write_prog "${pos}" "${pct}" "imaging"
+    sleep 10
+  done
+}
+raw_fifo=$(mktemp -u /tmp/udi-raw.XXXXXX)
+sha_fifo=$(mktemp -u /tmp/udi-sha.XXXXXX)
+mkfifo "${raw_fifo}" "${sha_fifo}"
+cleanup() { rm -f "${raw_fifo}" "${sha_fifo}"; }
+trap cleanup EXIT
+write_prog "0" "0" "start"
+if command -v zstd >/dev/null 2>&1 && [ "${COMP}" = "zstd" ]; then
+  (sha256sum < "${sha_fifo}" | awk -v f="${RBASE}" '{print $1 "  " f}' > "${RSHA}") &
+  sha_pid=$!
+  dd if="${DEV}" bs=4M of="${raw_fifo}" 2>/dev/null &
+  dd_pid=$!
+  monitor_dd "${dd_pid}" &
+  mon_pid=$!
+  tee "${sha_fifo}" < "${raw_fifo}" | zstd -T0 -3 -f -o "${RPATH}"
+  rc=$?
+  wait "${dd_pid}" || rc=$?
+  kill "${mon_pid}" 2>/dev/null || true
+  wait "${mon_pid}" 2>/dev/null || true
+  wait "${sha_pid}" || rc=$?
+else
+  RPATH="${RPATH%.zst}.gz"
+  RSHA="${RPATH}.sha256"
+  RPROG="${RPATH}.progress"
+  (sha256sum < "${sha_fifo}" | awk -v f="$(basename "${RPATH}")" '{print $1 "  " f}' > "${RSHA}") &
+  sha_pid=$!
+  dd if="${DEV}" bs=4M of="${raw_fifo}" 2>/dev/null &
+  dd_pid=$!
+  monitor_dd "${dd_pid}" &
+  mon_pid=$!
+  tee "${sha_fifo}" < "${raw_fifo}" | gzip -6 > "${RPATH}"
+  rc=$?
+  wait "${dd_pid}" || rc=$?
+  kill "${mon_pid}" 2>/dev/null || true
+  wait "${mon_pid}" 2>/dev/null || true
+  wait "${sha_pid}" || rc=$?
+fi
+final_pos="${TOTAL}"
+[ "${TOTAL}" -gt 0 ] || final_pos="$(out_bytes)"
+write_prog "${final_pos}" "100" "done"
+[ "${rc}" -eq 0 ] || exit "${rc}"
+ob="$(out_bytes)"
+if [ "${ob}" -lt 1024 ]; then
+  echo "ERROR: output image is tiny (${ob} bytes) — imaging likely failed (permissions/device)." >&2
+  exit 1
+fi
+exit 0
+REMOTE_IMG
+  elif [[ "${HOST}" == "local" ]]; then
+    # Same on-box pipeline as remote:* (progress file + pipefail), local paths.
+    local lpath="${img_file}" lsha="${sha_file}" lprog="${img_file}.progress"
+    log_info "Progress file (poll without attach): ${lprog}"
+    log_info "Watch: ./bin/udi-watch-progress --host local --file '${lpath}'"
+    DEV="${device}" RPATH="${lpath}" RSHA="${lsha}" RPROG="${lprog}" \
+      RBASE="$(basename "${lpath}")" COMP="${compressor}" TOTAL="${total_bytes}" \
+      RDIR="$(dirname "${lpath}")" \
+      bash -s << 'LOCAL_IMG'
+set -eu
+set -o pipefail 2>/dev/null || true
+mkdir -p "${RDIR}"
+if ! [ -r "${DEV}" ]; then
+  echo "ERROR: cannot read ${DEV} (Permission denied?). Run as admin/root." >&2
+  exit 1
+fi
+out_bytes() {
+  if [ -f "${RPATH}" ]; then wc -c < "${RPATH}" 2>/dev/null | tr -d ' '; else echo 0; fi
+}
+write_prog() {
+  local pos="$1" pct="$2" stage="$3"
+  local ob; ob="$(out_bytes)"
+  local line
+  line=$(printf "%s | stage=%s | read=%s/%s (%s%%) | out_bytes=%s" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${stage}" "${pos}" "${TOTAL}" "${pct}" "${ob}")
+  printf "%s\n" "${line}" > "${RPROG}"
+  printf "%s\n" "${line}" >&2
+}
+monitor_dd() {
+  local pid="$1" pos=0 pct=0
+  while kill -0 "${pid}" 2>/dev/null; do
+    if [ -r "/proc/${pid}/fdinfo/0" ]; then
+      pos=$(awk '/^pos:/ {print $2; exit}' "/proc/${pid}/fdinfo/0" 2>/dev/null || echo "${pos}")
+    fi
+    pct=0
+    if [ "${TOTAL}" -gt 0 ] 2>/dev/null; then
+      pct=$((pos * 100 / TOTAL))
+      [ "${pct}" -gt 100 ] && pct=100
+    fi
+    write_prog "${pos}" "${pct}" "imaging"
+    sleep 10
+  done
+}
+raw_fifo=$(mktemp -u /tmp/udi-raw.XXXXXX)
+sha_fifo=$(mktemp -u /tmp/udi-sha.XXXXXX)
+mkfifo "${raw_fifo}" "${sha_fifo}"
+cleanup() { rm -f "${raw_fifo}" "${sha_fifo}"; }
+trap cleanup EXIT
+write_prog "0" "0" "start"
+if command -v zstd >/dev/null 2>&1 && [ "${COMP}" = "zstd" ]; then
+  (sha256sum < "${sha_fifo}" | awk -v f="${RBASE}" '{print $1 "  " f}' > "${RSHA}") &
+  sha_pid=$!
+  dd if="${DEV}" bs=4M of="${raw_fifo}" 2>/dev/null &
+  dd_pid=$!
+  monitor_dd "${dd_pid}" &
+  mon_pid=$!
+  tee "${sha_fifo}" < "${raw_fifo}" | zstd -T0 -3 -f -o "${RPATH}"
+  rc=$?
+  wait "${dd_pid}" || rc=$?
+  kill "${mon_pid}" 2>/dev/null || true
+  wait "${mon_pid}" 2>/dev/null || true
+  wait "${sha_pid}" || rc=$?
+else
+  RPATH="${RPATH%.zst}.gz"
+  RSHA="${RPATH}.sha256"
+  RPROG="${RPATH}.progress"
+  (sha256sum < "${sha_fifo}" | awk -v f="$(basename "${RPATH}")" '{print $1 "  " f}' > "${RSHA}") &
+  sha_pid=$!
+  dd if="${DEV}" bs=4M of="${raw_fifo}" 2>/dev/null &
+  dd_pid=$!
+  monitor_dd "${dd_pid}" &
+  mon_pid=$!
+  tee "${sha_fifo}" < "${raw_fifo}" | gzip -6 > "${RPATH}"
+  rc=$?
+  wait "${dd_pid}" || rc=$?
+  kill "${mon_pid}" 2>/dev/null || true
+  wait "${mon_pid}" 2>/dev/null || true
+  wait "${sha_pid}" || rc=$?
+fi
+final_pos="${TOTAL}"
+[ "${TOTAL}" -gt 0 ] || final_pos="$(out_bytes)"
+write_prog "${final_pos}" "100" "done"
+[ "${rc}" -eq 0 ] || exit "${rc}"
+ob="$(out_bytes)"
+if [ "${ob}" -lt 1024 ]; then
+  echo "ERROR: output image is tiny (${ob} bytes) — imaging likely failed." >&2
+  exit 1
+fi
+exit 0
+LOCAL_IMG
   elif [[ "${compressor}" == "zstd" ]]; then
-    run_target "dd if='${device}' bs=4M status=none" | tee >(sha256_stream | awk -v f="${base}" '{print $1 "  " f}' > "${sha_file}") | zstd -T0 -3 -o "${img_file}"
+    log_info "Streaming device→operator host (use NAS --host local for multi-hour jobs)..."
+    run_target_live "dd if='${device}' bs=4M 2>/dev/null" \
+      | tee >(sha256_stream | awk -v f="${base}" '{print $1 "  " f}' > "${sha_file}") \
+      | zstd -T0 -3 -o "${img_file}"
   else
-    run_target "dd if='${device}' bs=4M status=none" | tee >(sha256_stream | awk -v f="${base}" '{print $1 "  " f}' > "${sha_file}") | gzip -6 > "${img_file}"
+    run_target_live "dd if='${device}' bs=4M 2>/dev/null" \
+      | tee >(sha256_stream | awk -v f="${base}" '{print $1 "  " f}' > "${sha_file}") \
+      | gzip -6 > "${img_file}"
   fi
 }
 stream_filtered_archive() {

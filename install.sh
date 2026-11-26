@@ -12,9 +12,11 @@ while [[ $# -gt 0 ]]; do
 done
 TARGET_LIB="${PREFIX}/share/usb-disk-imager"; TARGET_BIN="${PREFIX}/bin"
 mkdir -p "${TARGET_LIB}" "${TARGET_BIN}"
-cp -R "${SRC_DIR}/bin" "${SRC_DIR}/lib" "${SRC_DIR}/i18n" "${TARGET_LIB}/"
-chmod +x "${TARGET_LIB}/bin/usb-disk-imager"; ln -sf "${TARGET_LIB}/bin/usb-disk-imager" "${TARGET_BIN}/usb-disk-imager"
-echo "Installed usb-disk-imager to ${TARGET_BIN}/usb-disk-imager"
+cp -R "${SRC_DIR}/bin" "${SRC_DIR}/lib" "${SRC_DIR}/i18n" "${SRC_DIR}/docs" "${TARGET_LIB}/"
+chmod +x "${TARGET_LIB}/bin/usb-disk-imager" "${TARGET_LIB}/bin/udi-watch-progress"
+ln -sf "${TARGET_LIB}/bin/usb-disk-imager" "${TARGET_BIN}/usb-disk-imager"
+ln -sf "${TARGET_LIB}/bin/udi-watch-progress" "${TARGET_BIN}/udi-watch-progress"
+echo "Installed usb-disk-imager + udi-watch-progress to ${TARGET_BIN}/"
 if [[ -n "${CRON_SCHEDULE}" ]]; then
   CRON_CMD="${CRON_SCHEDULE} ${TARGET_BIN}/usb-disk-imager --host local --all-usb --os-only --auto-unmount --yes --execute >> /tmp/usb-disk-imager-cron.log 2>&1"
   (crontab -l 2>/dev/null | grep -v "usb-disk-imager"; echo "${CRON_CMD}") | crontab -
