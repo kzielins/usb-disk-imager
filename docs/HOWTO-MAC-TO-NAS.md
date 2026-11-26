@@ -6,12 +6,15 @@ Repo: [github.com/kzielins/usb-disk-imager](https://github.com/kzielins/usb-disk
 
 ## Paths
 
-| Role | Path |
-|------|------|
-| Mac clone (`cd` here first) | wherever you cloned this repo (example: `~/src/usb-disk-imager`) |
-| NAS sync target (`--remote-dir`) | `/share/homes/kzielins/ops/usb-disk-imager` |
-| NAS `cd` after sync | `/share/homes/kzielins/ops/usb-disk-imager` |
-| Image output | `/share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125` |
+| Where | Role | Path |
+|-------|------|------|
+| **Mac only** | clone (`cd` + `git pull`) | `~/src/usb-disk-imager` |
+| **NAS only** | sync target / tool tree | `/share/homes/kzielins/ops/usb-disk-imager` |
+| **NAS only** | image output | `/share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125` |
+
+**Do not** run `cd ~/src/usb-disk-imager` or `git pull` on the NAS — that path and `git` exist on the Mac. On the NAS after sync: `cd /share/homes/kzielins/ops/usb-disk-imager`.
+
+`udi-rsync-run` creates `--remote-dir` with `mkdir -p` (including missing `ops/`), then rsyncs.
 
 Need SSH user **`admin`** (or root) for `/dev/sdc`. `kzielins` → Permission denied.
 
@@ -124,17 +127,18 @@ git pull origin main
 
 ## 4) Manual on NAS (after Mac sync)
 
-Still start on Mac:
+Still start on **Mac**:
 
 ```bash
 cd ~/src/usb-disk-imager
 git pull origin main
 
+ssh admin@kznas3-1 'mkdir -p /share/homes/kzielins/ops/usb-disk-imager'
 rsync -avz --delete --exclude .git --exclude '.DS_Store' \
   ./ admin@kznas3-1:/share/homes/kzielins/ops/usb-disk-imager/
 ```
 
-Then NAS:
+Then on **NAS** (note the path — not `~/src/...`):
 
 ```bash
 ssh admin@kznas3-1
@@ -147,7 +151,17 @@ screen -S udi-dump
 # Ctrl-A D
 ```
 
-Status on NAS:
+Status — from **Mac** (preferred):
+
+```bash
+cd ~/src/usb-disk-imager
+git pull origin main
+./bin/udi-status --host kznas3-1 --user admin \
+  --dir /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125 \
+  --watch
+```
+
+Or on **NAS** after sync succeeded:
 
 ```bash
 cd /share/homes/kzielins/ops/usb-disk-imager
