@@ -20,4 +20,7 @@ MSG_ROTATE="Stosowanie retencji (zachowuję ostatnie %s kopii dla urządzenia)..
 MSG_DONE="SUKCES: Pliki zapisane w:"
 MSG_DETACH_BANNER="!!! ZAPIS W TLE NA NAS (screen) — Mac możesz potem odłączyć. To ZAPISUJE obraz dysku. !!!"
 MSG_DETACH_ASK="Uruchomić dump w tle na NAS teraz? Wpisz TAK (Enter = NIE): "
-MSG_DETACH_HINT="Po TAK: job idzie na NAS (screen udi-<dysk>). Potem monitoruj udi-status — bez trzymania SSH z Maca."
+MSG_DETACH_ASK_MENU="Uruchomić dump w tle na NAS teraz? (strzałki, Enter)"
+MSG_DETACH_YES="TAK — uruchom dump w tle na NAS (zapis obrazu)"
+MSG_DETACH_NO="NIE — tylko dry-run, nic nie zapisuj"
+MSG_DETACH_HINT="Po TAK: job idzie na NAS (screen udi-<dysk>). Potem auto-monitor udi-status."

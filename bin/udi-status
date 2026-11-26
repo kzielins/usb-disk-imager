@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: MIT
 # Author: Krzysztof Zielinski <https://github.com/kzielins>
 # Show REAL imaging progress: done bytes / planned device bytes → percent + ETA.
-# Reads key=value from *.progress (written by lib/image-pipeline.sh).
+# Also shows live compressed file size (proof the job is writing).
+# ALWAYS:
+#   cd ~/src/usb-disk-imager && git pull origin main
 set -euo pipefail
 
 HOST="" USER_NAME="admin" DIR="" FILE="" INTERVAL=5 WATCH=0 ONCE=1
@@ -10,29 +12,22 @@ HOST="" USER_NAME="admin" DIR="" FILE="" INTERVAL=5 WATCH=0 ONCE=1
 usage() {
   cat << 'USAGE'
 Usage:
-  udi-status --host <nas|local> [--user admin] --dir <job-folder-on-nas>
-  udi-status --host <nas|local> [--user admin] --file <path.img.zst|.progress>
-  udi-status ... --watch [--interval 5]
+  cd ~/src/usb-disk-imager && git pull origin main
+  ./bin/udi-status --host <nas|local> [--user admin] --dir <job-folder-on-nas>
+  ./bin/udi-status --host <nas|local> [--user admin] --file <path.img.zst|.img.gz|.progress>
+  ./bin/udi-status ... --watch [--interval 5]
 
 Shows:
-  planned total (device size) | bytes read so far | REAL percent | ETA | compressed out size
+  planned total (device size) | bytes read so far | REAL percent | ETA
+  live compressed out size (proof file is growing)
+  process health (dd / gzip / zstd)
 
-Percent formula (same as the imager):
+Percent formula:
   percent = read_bytes / total_bytes * 100
-  where read_bytes = dd position on the block device (/proc/.../fdinfo)
-  (compressed .img.zst size is NOT the percent — it is shown separately)
+  (compressed size is NOT the percent — shown separately)
 
-ALWAYS on Mac first:
-  cd ~/src/usb-disk-imager
-  git pull origin main
-
-Examples:
-  cd ~/src/usb-disk-imager && git pull origin main
-  ./bin/udi-status --host my-nas --user admin \
-    --dir /share/homes/USER/images_vmware/job --watch
-
-  ./bin/udi-status --host my-nas --user admin \
-    --file /share/homes/USER/images_vmware/job/NAME.img.zst
+If progress looks stale (0% / old updated_utc) but the image file grows,
+the dump is still running — trust the file-size line.
 USAGE
 }
 
@@ -65,7 +60,6 @@ remote_sh() {
   fi
 }
 
-# Resolve progress path on the target (prints one path).
 resolve_progress_script() {
   cat << 'EOS'
 set -e
@@ -88,7 +82,7 @@ if [ -f "$JOB" ]; then
   img=$(awk -F= '/^image=/{print $2; exit}' "$JOB")
   if [ -n "$img" ] && [ -f "${img}.progress" ]; then echo "${img}.progress"; exit 0; fi
 fi
-# newest *.progress under dir
+# Prefer newest progress that matches an existing image basename
 newest=$(ls -1t "$DIR_IN"/*.progress 2>/dev/null | head -n1 || true)
 if [ -n "$newest" ]; then echo "$newest"; exit 0; fi
 echo ""
@@ -98,6 +92,39 @@ EOS
 fetch_progress_body() {
   local prog_path="$1"
   remote_sh "if [ -f $(printf '%q' "${prog_path}") ]; then cat $(printf '%q' "${prog_path}"); else echo 'MISSING'; fi"
+}
+
+# Live health: image path from progress/job + process + size.
+fetch_health() {
+  local dir_q img_hint
+  dir_q=$(printf '%q' "${DIR:-}")
+  img_hint=$(printf '%q' "${1:-}")
+  remote_sh "
+set +e
+DIR=${dir_q}
+IMG_HINT=${img_hint}
+IMG=\"\$IMG_HINT\"
+if [ -z \"\$IMG\" ] || [ ! -f \"\$IMG\" ]; then
+  if [ -f \"\$DIR/.udi-job\" ]; then
+    IMG=\$(awk -F= '/^image=/{print \$2; exit}' \"\$DIR/.udi-job\")
+  fi
+fi
+if [ -z \"\$IMG\" ] || [ ! -f \"\$IMG\" ]; then
+  IMG=\$(ls -1t \"\$DIR\"/*.img.gz \"\$DIR\"/*.img.zst 2>/dev/null | head -n1)
+fi
+SZ=0
+MT=
+if [ -n \"\$IMG\" ] && [ -f \"\$IMG\" ]; then
+  SZ=\$(wc -c < \"\$IMG\" | tr -d ' ')
+  MT=\$(ls -l \"\$IMG\" | awk '{print \$5,\$6,\$7,\$8}')
+fi
+PROC=\$(ps w 2>/dev/null | grep -E '[d]d if=|[z]std |[g]zip ' | grep -v grep | head -n3 | tr '\\n' '|' | sed 's/|\$//')
+[ -z \"\$PROC\" ] && PROC=NONE
+echo \"image=\${IMG:-}\"
+echo \"size_bytes=\${SZ}\"
+echo \"ls_meta=\${MT}\"
+echo \"procs=\${PROC}\"
+"
 }
 
 human_gib() {
@@ -129,25 +156,35 @@ bar() {
 }
 
 kv() {
-  # stdin: progress file → print value for key $1
   local key="$1"
   awk -F= -v k="$key" '$1==k { sub(/^[^=]*=/,""); print; exit }'
 }
 
 render() {
-  local body="$1" prog_path="$2"
+  local body="$1" prog_path="$2" health="$3"
+  local image_h size_h procs_h
+  image_h=$(echo "${health}" | kv image)
+  size_h=$(echo "${health}" | kv size_bytes)
+  procs_h=$(echo "${health}" | kv procs)
+
   if [[ "${body}" == "MISSING" || -z "${body}" ]]; then
-    echo "No progress file yet at: ${prog_path}"
-    echo "Job may not have started, or wrong --dir/--file."
-    return 1
+    echo "========== usb-disk-imager STATUS =========="
+    echo "Progress file: MISSING (${prog_path:-none})"
+    echo "Live image:  ${image_h:-?}"
+    echo "Live size:   $(human_gib "${size_h:-0}") GiB compressed (${size_h:-0} bytes)"
+    echo "Processes:   ${procs_h:-?}"
+    echo "============================================"
+    echo "No *.progress yet — if Live size grows, dump IS running."
+    return 0
   fi
-  # Legacy one-line format fallback (pre-v1 key=value)
+
   if ! echo "${body}" | grep -q '^percent='; then
     echo "(legacy progress line)"
     echo "${body}"
     return 0
   fi
-  local pct total read out stage device image eta rate updated human status_note
+
+  local pct total read out stage device image eta rate updated human
   pct=$(echo "${body}" | kv percent)
   total=$(echo "${body}" | kv total_bytes)
   read=$(echo "${body}" | kv read_bytes)
@@ -160,7 +197,12 @@ render() {
   updated=$(echo "${body}" | kv updated_utc)
   human=$(echo "${body}" | kv human)
 
-  # Recompute percent locally to prove the formula (ignore stale/bad values)
+  # Prefer live size from health when progress out_bytes is stale/zero
+  if [[ "${size_h}" =~ ^[0-9]+$ && "${size_h}" -gt 0 ]]; then
+    out="${size_h}"
+  fi
+  [[ -n "${image_h}" ]] && image="${image_h}"
+
   local calc_pct=0
   if [[ "${total}" =~ ^[0-9]+$ && "${read}" =~ ^[0-9]+$ && "${total}" -gt 0 ]]; then
     calc_pct=$(( read * 100 / total ))
@@ -184,9 +226,14 @@ render() {
   echo "Planned:   $(human_gib "${total}") GiB  ← full block device size"
   echo "Done:      $(human_gib "${read}") GiB  ← bytes read from device so far"
   echo "Out file:  $(human_gib "${out}") GiB compressed (NOT used for %)"
+  echo "Live size: $(human_gib "${size_h:-0}") GiB  ← ls on NAS right now"
+  echo "Processes: ${procs_h:-?}"
   echo "Speed:     ${rate_mibs}"
   echo "ETA:       $(fmt_eta "${eta}")"
   echo "Formula:   percent = read_bytes / total_bytes * 100"
+  if [[ "${pct}" -eq 0 && "${size_h:-0}" =~ ^[0-9]+$ && "${size_h}" -gt 1048576 ]]; then
+    echo "NOTE:      % stuck at 0 but file is growing — dump IS running; progress PID probe lagged."
+  fi
   [[ -n "${human}" ]] && echo "Summary:   ${human}"
   echo "============================================"
 }
@@ -205,14 +252,21 @@ resolve_path() {
 }
 
 main_once() {
-  local prog body
+  local prog body health img_hint
   prog=$(resolve_path)
-  if [[ -z "${prog}" ]]; then
-    echo "No .progress / .udi-job found under --dir ${DIR:-?} / --file ${FILE:-?}"
-    return 1
+  body="MISSING"
+  img_hint=""
+  if [[ -n "${prog}" ]]; then
+    body=$(fetch_progress_body "${prog}") || body="MISSING"
+    img_hint=$(echo "${body}" | kv image)
   fi
-  body=$(fetch_progress_body "${prog}") || body="MISSING"
-  render "${body}" "${prog}"
+  [[ -z "${img_hint}" && -n "${FILE}" ]] && img_hint="${FILE}"
+  health=$(fetch_health "${img_hint}") || health="image=\nsize_bytes=0\nprocs=UNKNOWN"
+  if [[ -z "${prog}" ]]; then
+    render "MISSING" "" "${health}"
+    return 0
+  fi
+  render "${body}" "${prog}" "${health}"
 }
 
 if [[ "${WATCH}" -eq 1 ]]; then
