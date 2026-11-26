@@ -1,15 +1,18 @@
 # HOWTO — interaktywny plan na Macu, dump w tle na NAS
 
-Repo: [usb-disk-imager](https://github.com/kzielins/usb-disk-imager) | v2.2.7+
+Repo: [usb-disk-imager](https://github.com/kzielins/usb-disk-imager) | v2.2.8+
 
-**Wymaganie:** Mac może się rozłączyć na 12–40 h. Długi dump musi iść **na NAS** (screen/nohup), nie przez otwarte SSH z Maca.
+**Wymaganie:** Mac może się rozłączyć na 12–40 h. Długi dump musi iść **na NAS** (screen), nie przez otwarte SSH z Maca.
 
-## Flow (to jest właściwy)
+## Flow
 
-1. Na Macu: interaktywne TUI (wybór dysku/katalogu, dry-run, potwierdzenia).
-2. Po `--execute` / potwierdzeniu: tool **sam** odstawia job na NAS (`screen -dmS udi-sdc`).
-3. Mac możesz zamknąć.
-4. Monitorujesz `./bin/udi-status … --watch` albo `screen -r`.
+1. Mac: interaktywne TUI — wybór dysku + katalogu → **PODSUMOWANIE**.
+2. Jedno pytanie: **„Uruchomić dump w tle na NAS? Wpisz TAK”** (Enter = nie).
+3. Po TAK: job leci na NAS (`screen udi-sdc`); Mac dostaje komendy monitora i możesz się rozłączyć.
+4. Monitor: `./bin/udi-status … --watch`.
+
+Docelowy katalog w Twoim ostatnim planie:
+`remote:/share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261126`
 
 ---
 
