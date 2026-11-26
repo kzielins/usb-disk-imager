@@ -17,6 +17,7 @@ EXECUTE=0
 YES_FLAG=0
 SESSION_NAME="udi-dump"
 DRY_SYNC=0
+REATTACH=0
 
 usage() {
   cat << 'USAGE'
@@ -25,7 +26,7 @@ Usage — ALWAYS on Mac first:
   git pull origin main
 
 Modes:
-  A) INTERACTIVE wizard (menus: user/disk/dir) — you watch in screen:
+  A) INTERACTIVE wizard (disk/dir menus on NAS) — kills old screen, starts FRESH TUI:
      ./bin/udi-rsync-run --host my-nas --user admin \
        --remote-dir /share/homes/USER/ops/usb-disk-imager \
        --approach wizard
@@ -37,20 +38,17 @@ Modes:
        --approach screen-detach --execute --yes
 
 Approaches:
-  --approach wizard          (default) rsync + screen with FULL TUI wizard
-  --approach screen-attach   same as wizard if no --yes; or run fixed CLI in screen
-  --approach screen-detach   detached screen; REQUIRES --execute --yes (no TUI)
+  --approach wizard          (default) rsync + NEW screen with FULL TUI (quits old udi-dump)
+  --approach screen-attach   like wizard; use --reattach to only join existing screen
+  --approach screen-detach   detached; REQUIRES --execute --yes (no TUI)
   --approach nohup           background; REQUIRES --execute --yes (no TUI)
 
 Other:
   -H/--host -u/--user -d/--device -o/--out-dir --remote-dir --session
-  -l/--lang --execute --yes --dry-sync -h/--help
+  -l/--lang --execute --yes --dry-sync --reattach -h/--help
 
 Status (Mac):
   ./bin/udi-status --host my-nas --user admin --dir /share/.../job --watch
-
-See existing screen:
-  ssh -t admin@my-nas 'export TERM=vt100; screen -r udi-dump'
 USAGE
 }
 
@@ -67,6 +65,7 @@ while [[ $# -gt 0 ]]; do
     --execute) EXECUTE=1; shift ;;
     --yes) YES_FLAG=1; shift ;;
     --dry-sync) DRY_SYNC=1; shift ;;
+    --reattach) REATTACH=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -157,21 +156,28 @@ echo "    Command:     ${IMAGER_CMD}"
 case "${APPROACH}" in
   wizard|screen-attach)
     echo ""
-    echo ">>> Opening screen on NAS. You should SEE the TUI / logs."
-    echo ">>> Detach later with Ctrl-A then D (job keeps running)."
+    echo ">>> Opening FRESH screen with usb-disk-imager TUI (not a bare admin shell)."
+    echo ">>> Detach later: Ctrl-A then D."
     echo ""
+    # Old udi-dump often left a bare bash after a failed/finished job — reattach
+    # looked like "admin SSH questions" and never showed the wizard. Quit it first
+    # unless --reattach was requested.
     ssh -t -o ConnectTimeout=10 \
       -o ServerAliveInterval=30 -o ServerAliveCountMax=240 \
       "${SSH_USER}@${HOST}" \
       "mkdir -p $(printf '%q' "${REMOTE_DIR}") $( [[ -n "${OUT_DIR}" ]] && printf '%q' "${OUT_DIR}" ) && \
        cd $(printf '%q' "${REMOTE_DIR}") && export TERM=vt100 && \
        if ! command -v screen >/dev/null 2>&1; then echo 'ERROR: screen not found; use --approach nohup' >&2; exit 1; fi && \
+       if [ '${REATTACH}' = '1' ] && TERM=vt100 screen -ls 2>/dev/null | grep -q '[.]${SESSION_NAME}[[:space:]]'; then \
+         echo 'Reattaching existing session ${SESSION_NAME} (--reattach)...'; \
+         exec screen -d -r '${SESSION_NAME}'; \
+       fi && \
        if TERM=vt100 screen -ls 2>/dev/null | grep -q '[.]${SESSION_NAME}[[:space:]]'; then \
-         echo 'Reattaching existing session ${SESSION_NAME} (your previous run)...'; \
-         exec screen -r '${SESSION_NAME}'; \
-       else \
-         exec screen -S '${SESSION_NAME}' bash -lc 'cd \"${REMOTE_DIR}\" && ${IMAGER_CMD}; ec=\$?; echo EXIT:\$ec; echo \"(shell stays open — Ctrl-A D to detach)\"; exec bash'; \
-       fi"
+         echo \"Quitting stale screen ${SESSION_NAME} so wizard can start clean...\"; \
+         TERM=vt100 screen -S '${SESSION_NAME}' -X quit || true; \
+         sleep 1; \
+       fi && \
+       exec screen -S '${SESSION_NAME}' bash -lc 'cd \"${REMOTE_DIR}\" && echo \"=== usb-disk-imager wizard ===\"; ${IMAGER_CMD}; ec=\$?; echo; echo EXIT:\$ec; echo \"Ctrl-A D = detach\"; exec bash'"
     ;;
   screen-detach)
     "${ssh_base[@]}" "mkdir -p $(printf '%q' "${OUT_DIR}") $(printf '%q' "${REMOTE_DIR}") && \
