@@ -57,56 +57,43 @@ git pull origin main
 
 ---
 
-## 2) From Mac — start dump (3 approaches)
+## 2) From Mac — start dump
 
-Each block is full copy-paste: `cd` → `git pull` → run.
+### A) INTERACTIVE wizard (menus like before) — recommended if you want TUI
 
-### Approach 1 — detached `screen` on NAS (recommended)
+You **see** disk/dir prompts inside `screen`. Ctrl-A D detaches.
 
 ```bash
 cd ~/src/usb-disk-imager
 git pull origin main
 
-./bin/udi-rsync-run \
-  --host kznas3-1 --user admin --device /dev/sdc \
-  --out-dir /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125 \
-  --remote-dir /share/homes/kzielins/ops/usb-disk-imager \
-  --approach screen-detach --lang pl --execute --yes
+./bin/udi-rsync-run --host kznas3-1 --user admin --remote-dir /share/homes/kzielins/ops/usb-disk-imager --approach wizard
 ```
 
-Reattach later:
+(One line — paste-safe.)
+
+### B) FIRE-AND-FORGET (NO menus — that is why you saw nothing)
+
+`--execute --yes` skips all TUI. Job runs in detached screen; use `udi-status` / `screen -r` to watch.
+
+```bash
+cd ~/src/usb-disk-imager
+git pull origin main
+
+./bin/udi-rsync-run --host kznas3-1 --user admin --device /dev/sdc --out-dir /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125 --remote-dir /share/homes/kzielins/ops/usb-disk-imager --approach screen-detach --lang pl --execute --yes
+```
+
+### C) nohup (also non-interactive)
+
+Same flags as B, `--approach nohup`.
+
+### See / take over existing screen (your current `udi-dump`)
 
 ```bash
 ssh -t admin@kznas3-1 'export TERM=vt100; screen -r udi-dump'
 ```
 
-### Approach 2 — `nohup`
-
-```bash
-cd ~/src/usb-disk-imager
-git pull origin main
-
-./bin/udi-rsync-run \
-  --host kznas3-1 --user admin --device /dev/sdc \
-  --out-dir /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125 \
-  --remote-dir /share/homes/kzielins/ops/usb-disk-imager \
-  --approach nohup --lang pl --execute --yes
-```
-
-### Approach 3 — interactive `screen` (Ctrl-A D to detach)
-
-```bash
-cd ~/src/usb-disk-imager
-git pull origin main
-
-./bin/udi-rsync-run \
-  --host kznas3-1 --user admin --device /dev/sdc \
-  --out-dir /share/homes/kzielins/images_vmware/kznas3-1-sdc-Windows-EFI-20261125 \
-  --remote-dir /share/homes/kzielins/ops/usb-disk-imager \
-  --approach screen-attach --lang pl --execute --yes
-```
-
-What `udi-rsync-run` does: rsync Mac clone → `/share/homes/kzielins/ops/usb-disk-imager`, then on NAS runs `./bin/usb-disk-imager --host local …` inside screen/nohup.
+If “Attached elsewhere”: `screen -d -r udi-dump`.
 
 ---
 
